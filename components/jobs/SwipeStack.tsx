@@ -8,7 +8,6 @@ interface Job {
   id: string;
   title: string;
   companyName: string;
-  description: string;
   requirements: {
     location?: string;
     salaryMin?: number;
@@ -23,7 +22,7 @@ interface Job {
 
 interface SwipeStackProps {
   jobs: Job[];
-  onEmpty: () => void;
+  onEmpty?: () => void;
 }
 
 export function SwipeStack({ jobs: initialJobs, onEmpty }: SwipeStackProps) {
@@ -57,7 +56,7 @@ export function SwipeStack({ jobs: initialJobs, onEmpty }: SwipeStackProps) {
     }
 
     if (jobs.length <= 1) {
-      onEmpty();
+      onEmpty?.();
     }
   };
 

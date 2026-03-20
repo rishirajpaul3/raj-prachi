@@ -18,7 +18,6 @@ export default async function JobsPage() {
   const profile = candidate
     ? (JSON.parse(candidate.profile) as CandidateProfile)
     : ({} as CandidateProfile);
-  const hasProfile = Object.keys(profile).length > 0;
 
   // Get swiped role IDs (only if candidate row exists)
   const swipedIds: string[] = [];
@@ -115,7 +114,6 @@ export default async function JobsPage() {
     return {
       id: role.id,
       title: role.title,
-      description: role.description,
       companyName,
       requirements: req,
       score,
@@ -124,8 +122,9 @@ export default async function JobsPage() {
     };
   });
 
-  // Sort by score desc; 0-score jobs appear at the bottom (not hidden)
-  const jobs = scored.sort((a, b) => b.score - a.score);
+  // Sort by score desc; 0-score jobs at bottom (not hidden)
+  // Cap at 200 — beyond that the swipe UX is impractical
+  const jobs = scored.sort((a, b) => b.score - a.score).slice(0, 200);
 
   if (jobs.length === 0) {
     return (
@@ -149,7 +148,7 @@ export default async function JobsPage() {
 
   return (
     <div className="h-full">
-      <SwipeStack jobs={jobs} onEmpty={() => {}} />
+      <SwipeStack jobs={jobs} />
     </div>
   );
 }

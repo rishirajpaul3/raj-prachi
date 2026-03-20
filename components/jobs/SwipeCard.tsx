@@ -8,7 +8,6 @@ interface Job {
   id: string;
   title: string;
   companyName: string;
-  description: string;
   requirements: {
     location?: string;
     salaryMin?: number;
