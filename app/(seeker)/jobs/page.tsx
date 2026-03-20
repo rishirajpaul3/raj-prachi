@@ -1,7 +1,7 @@
 import { requireSession } from "@/lib/session";
 import { db } from "@/lib/db";
 import { candidates, roles, jobSwipes, employers } from "@/lib/db/schema";
-import { eq, and, notInArray, desc } from "drizzle-orm";
+import { eq, and, notInArray, desc, inArray } from "drizzle-orm";
 import { SwipeStack } from "@/components/jobs/SwipeStack";
 import Link from "next/link";
 import type { CandidateProfile } from "@/lib/types";
@@ -42,79 +42,87 @@ export default async function JobsPage() {
     )
     .orderBy(desc(roles.createdAt));
 
+  // Batch-fetch all needed employer names in one query (avoids N+1 with 900+ jobs)
+  const missingNameRoleEmployerIds = [
+    ...new Set(
+      allRoles
+        .filter((r) => !r.companyName && r.employerId)
+        .map((r) => r.employerId as string)
+    ),
+  ];
+
+  const employerMap = new Map<string, string>();
+  if (missingNameRoleEmployerIds.length > 0) {
+    const employerRows = await db
+      .select({ id: employers.id, companyName: employers.companyName })
+      .from(employers)
+      .where(inArray(employers.id, missingNameRoleEmployerIds));
+    for (const e of employerRows) employerMap.set(e.id, e.companyName);
+  }
+
   // Score each role with weighted signals
   const candidateSkills = (profile.skills ?? []).map((s) => s.toLowerCase());
   const candidateIndustries = (profile.industries ?? []).map((s) => s.toLowerCase());
 
-  const scored = await Promise.all(
-    allRoles.map(async (role) => {
-      const req = JSON.parse(role.requirements) as {
-        skills?: string[];
-        salaryMin?: number;
-        salaryMax?: number;
-        remote?: boolean;
-        location?: string;
-        minYearsExperience?: number;
-        maxYearsExperience?: number;
-        industry?: string;
-        level?: string;
-      };
+  const scored = allRoles.map((role) => {
+    const req = JSON.parse(role.requirements) as {
+      skills?: string[];
+      salaryMin?: number;
+      salaryMax?: number;
+      remote?: boolean;
+      location?: string;
+      minYearsExperience?: number;
+      maxYearsExperience?: number;
+      industry?: string;
+      level?: string;
+    };
 
-      let score = 0;
+    let score = 0;
 
-      // Skills match — highest weight (40 pts per matched skill)
-      const roleSkills = (req.skills ?? []).map((s) => s.toLowerCase());
-      const matched = candidateSkills.filter((s) => roleSkills.includes(s));
-      score += matched.length * 40;
+    // Skills match — highest weight (40 pts per matched skill)
+    const roleSkills = (req.skills ?? []).map((s) => s.toLowerCase());
+    const matched = candidateSkills.filter((s) => roleSkills.includes(s));
+    score += matched.length * 40;
 
-      // Industry match (20 pts)
-      if (req.industry && candidateIndustries.includes(req.industry.toLowerCase())) {
-        score += 20;
+    // Industry match (20 pts)
+    if (req.industry && candidateIndustries.includes(req.industry.toLowerCase())) {
+      score += 20;
+    }
+
+    // Experience level fit (15 pts)
+    if (profile.yearsOfExperience !== undefined) {
+      const min = req.minYearsExperience ?? 0;
+      const max = req.maxYearsExperience ?? 99;
+      if (profile.yearsOfExperience >= min && profile.yearsOfExperience <= max) {
+        score += 15;
       }
+    }
 
-      // Experience level fit (15 pts)
-      if (profile.yearsOfExperience !== undefined) {
-        const min = req.minYearsExperience ?? 0;
-        const max = req.maxYearsExperience ?? 99;
-        if (profile.yearsOfExperience >= min && profile.yearsOfExperience <= max) {
-          score += 15;
-        }
-      }
+    // Remote / location preference (20 pts)
+    if (profile.remotePreference === "remote" && req.remote) score += 20;
+    else if (profile.remotePreference === "onsite" && !req.remote) score += 10;
+    else if (profile.remotePreference === "hybrid") score += 5;
 
-      // Remote / location preference (20 pts)
-      if (profile.remotePreference === "remote" && req.remote) score += 20;
-      else if (profile.remotePreference === "onsite" && !req.remote) score += 10;
-      else if (profile.remotePreference === "hybrid") score += 5;
+    // Salary fit (15 pts)
+    if (profile.salaryMin && req.salaryMax && profile.salaryMin <= req.salaryMax) score += 15;
 
-      // Salary fit (15 pts)
-      if (profile.salaryMin && req.salaryMax && profile.salaryMin <= req.salaryMax) score += 15;
+    // Resolve company name — direct field first, then employer map
+    const companyName =
+      role.companyName ??
+      (role.employerId ? employerMap.get(role.employerId) : undefined) ??
+      "Unknown Company";
 
-      // Company size preference (10 pts) — stored on role title/description heuristically
-      // Only score if we have a direct match signal (future: add companySize to roles schema)
-
-      // External jobs store companyName directly; internal roles use employer table
-      let companyName = role.companyName;
-      if (!companyName && role.employerId) {
-        const [employer] = await db
-          .select({ companyName: employers.companyName })
-          .from(employers)
-          .where(eq(employers.id, role.employerId))
-          .limit(1);
-        companyName = employer?.companyName ?? null;
-      }
-
-      return {
-        id: role.id,
-        title: role.title,
-        description: role.description,
-        companyName: companyName ?? "Unknown Company",
-        requirements: req,
-        score,
-        matchedSkills: matched,
-        rajReason: generateRajReason(role.title, matched, req.remote ?? false, profile),
-      };
-    })
-  );
+    return {
+      id: role.id,
+      title: role.title,
+      description: role.description,
+      companyName,
+      requirements: req,
+      score,
+      matchedSkills: matched,
+      rajReason: generateRajReason(role.title, matched, req.remote ?? false, profile),
+    };
+  });
 
   // Sort by score desc; 0-score jobs appear at the bottom (not hidden)
   const jobs = scored.sort((a, b) => b.score - a.score);
