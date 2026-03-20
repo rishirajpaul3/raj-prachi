@@ -38,8 +38,11 @@ export default async function SeekerLayout({
         </div>
       </header>
 
-      {/* Page content */}
-      <div className="flex-1 overflow-hidden">{children}</div>
+      {/* Page content — flex-1 fills space between header and nav spacer */}
+      <div className="flex-1 overflow-hidden min-h-0">{children}</div>
+
+      {/* Spacer reserves 64px so content never scrolls behind the fixed TabBar */}
+      <div className="h-16 flex-shrink-0" aria-hidden="true" />
 
       <SeekerIcons unreadCount={unreadCount} />
     </div>

@@ -6,6 +6,9 @@ import { SwipeStack } from "@/components/jobs/SwipeStack";
 import Link from "next/link";
 import type { CandidateProfile } from "@/lib/types";
 
+// Always re-render so the latest profile/swipes are used for scoring
+export const dynamic = "force-dynamic";
+
 export default async function JobsPage() {
   const userId = await requireSession();
 
