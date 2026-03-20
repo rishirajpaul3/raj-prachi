@@ -123,15 +123,20 @@ export async function POST(req: NextRequest) {
       const choice = response.choices[0];
       if (!choice) break;
 
-      if (choice.finish_reason === "stop") {
-        finalResponse = choice.message.content ?? "";
+      // Check for tool_calls FIRST — some Groq model versions set finish_reason="stop"
+      // while still including tool_calls in the message (llama quirk).
+      const toolCalls = (choice.message.tool_calls ?? []).filter(
+        (tc): tc is FunctionToolCall => tc.type === "function"
+      );
+
+      if (toolCalls.length === 0) {
+        // No tool calls → this is the final text response; strip any XML tool-call
+        // artifacts that llama occasionally emits as plain text.
+        finalResponse = stripToolCallMarkup(choice.message.content ?? "");
         break;
       }
 
-      if (choice.finish_reason === "tool_calls") {
-        const toolCalls = (choice.message.tool_calls ?? []).filter(
-          (tc): tc is FunctionToolCall => tc.type === "function"
-        );
+      if (toolCalls.length > 0) {
 
         // Add assistant message (with tool_calls) to in-memory history
         groqMessages.push({
@@ -175,9 +180,6 @@ export async function POST(req: NextRequest) {
 
         continue;
       }
-
-      // Unexpected finish_reason
-      break;
     }
 
     if (toolCallCount >= MAX_TOOL_CALLS) {
@@ -210,6 +212,20 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+// ─── Strip XML tool-call markup from LLM text output ─────────────────────────
+// Groq/llama models sometimes emit tool calls as plain-text XML alongside or
+// instead of the structured API response. Strip these before showing to users.
+
+function stripToolCallMarkup(text: string): string {
+  return text
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, "")
+    .replace(/<\/?(tool_call|function_calls|invoke|parameter)[^>]*>/gi, "")
+    .replace(/```json\s*\{\s*"name"\s*:[\s\S]*?```/gi, "")
+    .replace(/\[TOOL_CALLS\][\s\S]*?\[\/TOOL_CALLS\]/gi, "")
+    .trim();
 }
 
 // ─── Tool dispatcher ──────────────────────────────────────────────────────────

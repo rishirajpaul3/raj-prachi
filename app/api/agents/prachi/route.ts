@@ -139,16 +139,18 @@ export async function POST(req: NextRequest) {
       const choice = response.choices[0];
       if (!choice) break;
 
-      if (choice.finish_reason === "stop") {
-        finalResponse = choice.message.content ?? "";
+      // Check tool_calls first — some Groq/llama versions set finish_reason="stop"
+      // while still including tool_calls (quirk of certain model releases).
+      const toolCalls = (choice.message.tool_calls ?? []).filter(
+        (tc): tc is FunctionToolCall => tc.type === "function"
+      );
+
+      if (toolCalls.length === 0) {
+        finalResponse = stripToolCallMarkup(choice.message.content ?? "");
         break;
       }
 
-      if (choice.finish_reason === "tool_calls") {
-        const toolCalls = (choice.message.tool_calls ?? []).filter(
-          (tc): tc is FunctionToolCall => tc.type === "function"
-        );
-
+      if (toolCalls.length > 0) {
         groqMessages.push({
           role: "assistant",
           content: choice.message.content,
@@ -191,8 +193,6 @@ export async function POST(req: NextRequest) {
 
         continue;
       }
-
-      break;
     }
 
     if (toolCallCount >= MAX_TOOL_CALLS) {
@@ -224,6 +224,16 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+function stripToolCallMarkup(text: string): string {
+  return text
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, "")
+    .replace(/<\/?(tool_call|function_calls|invoke|parameter)[^>]*>/gi, "")
+    .replace(/```json\s*\{\s*"name"\s*:[\s\S]*?```/gi, "")
+    .replace(/\[TOOL_CALLS\][\s\S]*?\[\/TOOL_CALLS\]/gi, "")
+    .trim();
 }
 
 async function executePrachiTool(
