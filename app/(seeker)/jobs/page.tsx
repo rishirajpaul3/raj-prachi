@@ -59,9 +59,8 @@ export default async function JobsPage() {
     for (const e of employerRows) employerMap.set(e.id, e.companyName);
   }
 
-  // Score each role with weighted signals
-  const candidateSkills = (profile.skills ?? []).map((s) => s.toLowerCase());
-  const candidateIndustries = (profile.industries ?? []).map((s) => s.toLowerCase());
+  const candidateTerms = buildCandidateTerms(profile);
+  const hasProfile = candidateTerms.length > 0;
 
   const scored = allRoles.map((role) => {
     const req = JSON.parse(role.requirements) as {
@@ -76,40 +75,14 @@ export default async function JobsPage() {
       level?: string;
     };
 
-    let score = 0;
-
-    // Skills match — highest weight (40 pts per matched skill)
-    const roleSkills = (req.skills ?? []).map((s) => s.toLowerCase());
-    const matched = candidateSkills.filter((s) => roleSkills.includes(s));
-    score += matched.length * 40;
-
-    // Industry match (20 pts)
-    if (req.industry && candidateIndustries.includes(req.industry.toLowerCase())) {
-      score += 20;
-    }
-
-    // Experience level fit (15 pts)
-    if (profile.yearsOfExperience !== undefined) {
-      const min = req.minYearsExperience ?? 0;
-      const max = req.maxYearsExperience ?? 99;
-      if (profile.yearsOfExperience >= min && profile.yearsOfExperience <= max) {
-        score += 15;
-      }
-    }
-
-    // Remote / location preference (20 pts)
-    if (profile.remotePreference === "remote" && req.remote) score += 20;
-    else if (profile.remotePreference === "onsite" && !req.remote) score += 10;
-    else if (profile.remotePreference === "hybrid") score += 5;
-
-    // Salary fit (15 pts)
-    if (profile.salaryMin && req.salaryMax && profile.salaryMin <= req.salaryMax) score += 15;
-
-    // Resolve company name — direct field first, then employer map
     const companyName =
       role.companyName ??
       (role.employerId ? employerMap.get(role.employerId) : undefined) ??
       "Unknown Company";
+
+    const { score, matchedKeywords } = hasProfile
+      ? scoreJobForCandidate(profile, candidateTerms, role.title, role.description, req)
+      : { score: 0, matchedKeywords: [] as string[] };
 
     return {
       id: role.id,
@@ -117,13 +90,12 @@ export default async function JobsPage() {
       companyName,
       requirements: req,
       score,
-      matchedSkills: matched,
-      rajReason: generateRajReason(role.title, matched, req.remote ?? false, profile),
+      matchedSkills: matchedKeywords,
+      rajReason: buildRajReason(role.title, matchedKeywords, req, profile),
     };
   });
 
-  // Sort by score desc; 0-score jobs at bottom (not hidden)
-  // Cap at 200 — beyond that the swipe UX is impractical
+  // Sort by score desc. If no profile, preserve recency order (all score 0).
   const jobs = scored.sort((a, b) => b.score - a.score).slice(0, 200);
 
   if (jobs.length === 0) {
@@ -153,29 +125,166 @@ export default async function JobsPage() {
   );
 }
 
-function generateRajReason(
+// ─── Scoring engine ────────────────────────────────────────────────────────────
+
+const STOP_WORDS = new Set([
+  "a","an","the","and","or","but","in","on","at","to","for","of","with","by",
+  "from","up","about","into","is","are","was","were","be","been","being",
+  "have","has","had","do","does","did","will","would","should","could","may",
+  "might","can","this","that","these","those","we","you","they","our","your",
+  "their","its","as","not","more","also","than","when","how","all","both",
+  "each","such","if","no","nor","so","yet","whether","very","just","new",
+  "work","working","experience","skills","team","role","position","join","help",
+  "looking","seeking","required","requirements","strong","excellent","good",
+]);
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+}
+
+/**
+ * Build the set of terms that represent this candidate.
+ * Includes multi-word phrases (kept intact) AND individual word tokens.
+ */
+function buildCandidateTerms(profile: CandidateProfile): string[] {
+  const terms = new Set<string>();
+
+  const addPhrase = (phrase: string) => {
+    const lower = phrase.toLowerCase().trim();
+    if (lower.length > 2) terms.add(lower);
+    // Also add individual tokens so "content marketing" also fires on "content"
+    for (const w of tokenize(lower)) terms.add(w);
+  };
+
+  for (const s of profile.skills ?? []) addPhrase(s);
+  for (const i of profile.industries ?? []) addPhrase(i);
+  if (profile.currentTitle) for (const w of tokenize(profile.currentTitle)) terms.add(w);
+  if (profile.careerGoals) for (const w of tokenize(profile.careerGoals)) terms.add(w);
+  if (profile.summary) for (const w of tokenize(profile.summary)) terms.add(w);
+
+  return [...terms];
+}
+
+interface ParsedReq {
+  skills?: string[];
+  salaryMin?: number;
+  salaryMax?: number;
+  remote?: boolean;
+  location?: string;
+  minYearsExperience?: number;
+  maxYearsExperience?: number;
+  industry?: string;
+  level?: string;
+}
+
+/**
+ * Score a job against a candidate profile.
+ *
+ * Scoring (max 100):
+ *   Text relevance  — 60 pts: candidate terms found in title (5 pts) or description (2 pts)
+ *   Tag overlap     — 20 pts: structured skill tags (5 pts each, max 4 matches)
+ *   Preferences     — 20 pts: remote (8), salary (6), experience (6)
+ */
+function scoreJobForCandidate(
+  profile: CandidateProfile,
+  candidateTerms: string[],
+  jobTitle: string,
+  jobDescription: string,
+  req: ParsedReq
+): { score: number; matchedKeywords: string[] } {
+  const titleTokens = new Set(tokenize(jobTitle));
+  const fullText = `${jobTitle} ${jobDescription}`.toLowerCase();
+  const fullTokens = new Set(tokenize(fullText));
+
+  // Multi-word phrase check (e.g. "content marketing" as substring)
+  const multiWord = candidateTerms.filter((t) => t.includes(" "));
+  const singleWord = candidateTerms.filter((t) => !t.includes(" "));
+
+  let textPts = 0;
+  const matched = new Set<string>();
+
+  for (const phrase of multiWord) {
+    if (fullText.includes(phrase)) {
+      textPts += jobTitle.toLowerCase().includes(phrase) ? 8 : 3;
+      matched.add(phrase);
+    }
+  }
+
+  for (const word of singleWord) {
+    if (titleTokens.has(word)) {
+      textPts += 5;
+      matched.add(word);
+    } else if (fullTokens.has(word)) {
+      textPts += 2;
+      matched.add(word);
+    }
+  }
+
+  const textScore = Math.min(textPts, 60);
+
+  // Structured tag overlap (max 20)
+  const profileTags = (profile.skills ?? []).map((s) => s.toLowerCase());
+  const roleTags = (req.skills ?? []).map((s) => s.toLowerCase());
+  const tagMatches = profileTags.filter((s) => roleTags.includes(s));
+  const tagScore = Math.min(tagMatches.length * 5, 20);
+  for (const t of tagMatches) matched.add(t);
+
+  // Preferences (max 20)
+  let prefScore = 0;
+  if (profile.remotePreference === "remote" && req.remote) prefScore += 8;
+  else if (profile.remotePreference === "onsite" && !req.remote) prefScore += 5;
+  else if (profile.remotePreference === "hybrid") prefScore += 4;
+
+  if (profile.salaryMin && req.salaryMax && profile.salaryMin <= req.salaryMax) prefScore += 6;
+
+  if (profile.yearsOfExperience !== undefined) {
+    const min = req.minYearsExperience ?? 0;
+    const max = req.maxYearsExperience ?? 99;
+    if (profile.yearsOfExperience >= min && profile.yearsOfExperience <= max) prefScore += 6;
+  }
+
+  const score = textScore + tagScore + prefScore;
+
+  // Surface the most informative matched keywords (prefer multi-word, then shortest)
+  const displayKeywords = [...matched]
+    .sort((a, b) => {
+      const aMulti = a.includes(" ") ? 0 : 1;
+      const bMulti = b.includes(" ") ? 0 : 1;
+      return aMulti - bMulti || a.length - b.length;
+    })
+    .slice(0, 5);
+
+  return { score, matchedKeywords: displayKeywords };
+}
+
+function buildRajReason(
   roleTitle: string,
-  matchedSkills: string[],
-  isRemote: boolean,
+  matchedKeywords: string[],
+  req: ParsedReq,
   profile: CandidateProfile
 ): string {
   const parts: string[] = [];
 
-  if (matchedSkills.length > 0) {
-    parts.push(`your ${matchedSkills.slice(0, 2).join(" and ")} experience is a direct match`);
+  if (matchedKeywords.length > 0) {
+    const kws = matchedKeywords.slice(0, 2).join(" and ");
+    parts.push(`your ${kws} background matches what they need`);
   }
 
-  if (isRemote && profile.remotePreference === "remote") {
+  if (req.remote && profile.remotePreference === "remote") {
     parts.push("it's fully remote");
   }
 
-  if (profile.salaryMin && parts.length < 2) {
-    parts.push(`the compensation fits your range`);
+  if (profile.salaryMin && req.salaryMax && profile.salaryMin <= req.salaryMax) {
+    parts.push("the comp fits your range");
   }
 
   if (parts.length === 0) {
-    return `I think the ${roleTitle} role could be a good fit based on your background.`;
+    return `This ${roleTitle} role could be worth a look based on your background.`;
   }
 
-  return `I picked this because ${parts.join(" and ")}.`;
+  return `Picked this because ${parts.join(", and ")}.`;
 }
