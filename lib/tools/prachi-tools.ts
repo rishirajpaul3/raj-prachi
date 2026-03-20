@@ -32,7 +32,12 @@ export async function getJobDetails(roleId: string): Promise<ToolResult> {
     companyName = employer?.companyName ?? null;
   }
 
-  const requirements = JSON.parse(role.requirements) as RoleRequirements;
+  let requirements: RoleRequirements = {};
+  try {
+    requirements = JSON.parse(role.requirements) as RoleRequirements;
+  } catch {
+    // malformed requirements — treat as empty
+  }
 
   return {
     success: true,
@@ -95,8 +100,18 @@ export async function analyzeFit(
     return { success: false, error: "Role not found" };
   }
 
-  const profile = JSON.parse(candidate.profile) as CandidateProfile;
-  const req = JSON.parse(role.requirements) as RoleRequirements;
+  let profile: CandidateProfile = {};
+  try {
+    profile = JSON.parse(candidate.profile) as CandidateProfile;
+  } catch {
+    // malformed profile — treat as empty
+  }
+  let req: RoleRequirements = {};
+  try {
+    req = JSON.parse(role.requirements) as RoleRequirements;
+  } catch {
+    // malformed requirements — treat as empty
+  }
 
   // Skill analysis
   const candidateSkills = (profile.skills ?? []).map((s) => s.toLowerCase());

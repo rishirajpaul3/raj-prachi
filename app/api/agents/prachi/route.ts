@@ -16,6 +16,7 @@ import {
 import type OpenAI from "openai";
 
 const MAX_TOOL_CALLS = 10;
+const MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
 
 type GroqMessage = OpenAI.Chat.ChatCompletionMessageParam;
 
@@ -27,6 +28,14 @@ type FunctionToolCall = {
 
 export async function POST(req: NextRequest) {
   try {
+    if (!process.env.GROQ_API_KEY) {
+      console.error("GROQ_API_KEY is not configured");
+      return NextResponse.json(
+        { error: "Prachi is not available right now. (Configuration error)" },
+        { status: 503 }
+      );
+    }
+
     const userId = await getSessionUserId();
     if (!userId) {
       return NextResponse.json({ error: "No session" }, { status: 401 });
@@ -123,18 +132,30 @@ export async function POST(req: NextRequest) {
     const client = createPrachiClient();
     let toolCallCount = 0;
     let finalResponse = "";
+    let modelIndex = 0;
 
     while (toolCallCount < MAX_TOOL_CALLS) {
-      const response = await client.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
-        max_tokens: 1024,
-        messages: [
-          { role: "system", content: PRACHI_SYSTEM_PROMPT + jobContext },
-          ...groqMessages,
-        ],
-        tools: PRACHI_TOOLS,
-        tool_choice: "auto",
-      });
+      let response;
+      try {
+        response = await client.chat.completions.create({
+          model: MODELS[modelIndex],
+          max_tokens: 1024,
+          messages: [
+            { role: "system", content: PRACHI_SYSTEM_PROMPT + jobContext },
+            ...groqMessages,
+          ],
+          tools: PRACHI_TOOLS,
+          tool_choice: "auto",
+        });
+      } catch (apiErr: unknown) {
+        // On rate limit, fall back to the next model in the list
+        const statusCode = (apiErr as { status?: number })?.status;
+        if (statusCode === 429 && modelIndex < MODELS.length - 1) {
+          modelIndex++;
+          continue;
+        }
+        throw apiErr;
+      }
 
       const choice = response.choices[0];
       if (!choice) break;
