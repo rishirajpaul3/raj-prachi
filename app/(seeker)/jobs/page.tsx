@@ -1,8 +1,8 @@
 import { requireSession } from "@/lib/session";
 import { db } from "@/lib/db";
 import { candidates, roles, jobSwipes, employers } from "@/lib/db/schema";
-import { eq, and, notInArray, desc, inArray } from "drizzle-orm";
-import { SwipeStack } from "@/components/jobs/SwipeStack";
+import { eq, and, notInArray, desc, inArray, gte } from "drizzle-orm";
+import { JobList } from "@/components/jobs/JobList";
 import Link from "next/link";
 import type { CandidateProfile } from "@/lib/types";
 
@@ -32,13 +32,16 @@ export default async function JobsPage() {
     swipedIds.push(...swiped.map((s) => s.roleId));
   }
 
-  // Fetch ALL active unswiped jobs — no artificial limit
+  // Only show jobs posted within the last 30 days — older listings are likely stale
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
   const allRoles = await db
     .select()
     .from(roles)
     .where(
       and(
         eq(roles.isActive, true),
+        gte(roles.createdAt, thirtyDaysAgo),
         swipedIds.length > 0 ? notInArray(roles.id, swipedIds) : undefined
       )
     )
@@ -91,6 +94,8 @@ export default async function JobsPage() {
       id: role.id,
       title: role.title,
       companyName,
+      description: role.description.slice(0, 600),
+      applyUrl: role.applyUrl ?? null,
       requirements: req,
       score,
       matchedSkills: matchedKeywords,
@@ -123,7 +128,7 @@ export default async function JobsPage() {
 
   return (
     <div className="h-full">
-      <SwipeStack jobs={jobs} />
+      <JobList jobs={jobs} />
     </div>
   );
 }

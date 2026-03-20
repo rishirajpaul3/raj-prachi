@@ -7,7 +7,7 @@
 import { XMLParser } from "fast-xml-parser";
 import { db } from "@/lib/db";
 import { roles } from "@/lib/db/schema";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, lt, isNotNull, inArray } from "drizzle-orm";
 
 interface NormalizedJob {
   externalId: string;
@@ -401,7 +401,79 @@ export async function refreshJobs(): Promise<{
       );
   }
 
+  // Hard age cutoff — any external listing older than 30 days is considered expired
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  await db
+    .update(roles)
+    .set({ isActive: false })
+    .where(
+      and(
+        isNotNull(roles.source),
+        lt(roles.createdAt, thirtyDaysAgo),
+        eq(roles.isActive, true)
+      )
+    );
+
+  // Spot-check apply URLs for listings that are 14–30 days old.
+  // Samples up to 20 at a time; marks 404s inactive immediately.
+  const urlCheckErrors = await spotCheckUrls();
+  errors.push(...urlCheckErrors);
+
   return { fetched: allJobs.length, upserted, errors };
+}
+
+// ─── URL spot-checker ─────────────────────────────────────────────────────────
+// HEAD-checks a sample of active listings that are 14–30 days old.
+// Marks 404s as inactive so users never encounter dead apply links.
+
+async function spotCheckUrls(): Promise<string[]> {
+  const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+  // Grab up to 20 active external jobs in the 14–30 day window
+  const candidates = await db
+    .select({ id: roles.id, applyUrl: roles.applyUrl })
+    .from(roles)
+    .where(
+      and(
+        isNotNull(roles.source),
+        isNotNull(roles.applyUrl),
+        eq(roles.isActive, true),
+        lt(roles.createdAt, fourteenDaysAgo),
+        // Exclude already-expired ones (handled by age cutoff above)
+        sql`${roles.createdAt} > ${thirtyDaysAgo}`
+      )
+    )
+    .limit(20);
+
+  if (candidates.length === 0) return [];
+
+  const errors: string[] = [];
+
+  // Check all in parallel — each with a 5s abort timeout
+  await Promise.allSettled(
+    candidates.map(async (row) => {
+      if (!row.applyUrl) return;
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch(row.applyUrl, {
+          method: "HEAD",
+          redirect: "follow",
+          signal: controller.signal,
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; jobcheck/1.0)" },
+        });
+        clearTimeout(timeout);
+        if (res.status === 404) {
+          await db.update(roles).set({ isActive: false }).where(eq(roles.id, row.id));
+        }
+      } catch {
+        // Timeout or network error — leave active; user-facing check will catch it
+      }
+    })
+  );
+
+  return errors;
 }
 
 // ─── Util ─────────────────────────────────────────────────────────────────────
