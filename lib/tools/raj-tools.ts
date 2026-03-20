@@ -109,7 +109,7 @@ export async function searchJobs(
         swipedIds.length > 0 ? notInArray(roles.id, swipedIds) : undefined
       )
     )
-    .limit(filters?.limit ?? 10);
+    .limit(filters?.limit ?? 50);
 
   const jobResults = await query;
 

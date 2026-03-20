@@ -230,7 +230,8 @@ function stripToolCallMarkup(text: string): string {
   return text
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
     .replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, "")
-    .replace(/<\/?(tool_call|function_calls|invoke|parameter)[^>]*>/gi, "")
+    .replace(/<function\b[^>]*>[\s\S]*?<\/function>/gi, "")
+    .replace(/<\/?(tool_call|function_calls|function|invoke|parameter)[^>]*>/gi, "")
     .replace(/```json\s*\{\s*"name"\s*:[\s\S]*?```/gi, "")
     .replace(/\[TOOL_CALLS\][\s\S]*?\[\/TOOL_CALLS\]/gi, "")
     .trim();
