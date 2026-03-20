@@ -131,14 +131,36 @@ export default async function JobsPage() {
 // ─── Scoring engine ────────────────────────────────────────────────────────────
 
 const STOP_WORDS = new Set([
+  // Articles, prepositions, conjunctions
   "a","an","the","and","or","but","in","on","at","to","for","of","with","by",
   "from","up","about","into","is","are","was","were","be","been","being",
   "have","has","had","do","does","did","will","would","should","could","may",
   "might","can","this","that","these","those","we","you","they","our","your",
   "their","its","as","not","more","also","than","when","how","all","both",
   "each","such","if","no","nor","so","yet","whether","very","just","new",
+  // Job description filler
   "work","working","experience","skills","team","role","position","join","help",
   "looking","seeking","required","requirements","strong","excellent","good",
+  "build","building","own","write","drive","shape","define","manage","run","use",
+  "using","across","within","without","including","including","based","focused",
+  // ── Generic role-level words ─────────────────────────────────────────────
+  // These appear in EVERY job title and create false cross-role matches.
+  // e.g. "engineer" in "GTM Engineer" should NOT match "Software Engineer".
+  // Specific role modifiers (gtm, software, revenue) are kept.
+  "engineer","engineering","engineers","manager","management","managers",
+  "analyst","analysts","developer","developers","specialist","specialists",
+  "director","directors","lead","leads","designer","designers","researcher",
+  "researchers","scientist","scientists","associate","associates","consultant",
+  "consultants","coordinator","coordinators","administrator","administrators",
+  "officer","executive","president","head","architect","architects",
+  // Seniority levels — also too generic to be useful matching signals
+  "senior","junior","mid","staff","principal","founding","intern","apprentice",
+  "entry","level","hire","hiring",
+]);
+
+// Important 2-char tech/business abbreviations that the length filter would drop
+const SHORT_ALLOWLIST = new Set([
+  "ai","ml","ui","ux","vr","ar","b2b","b2c","hr","qa","pr","pm",
 ]);
 
 function tokenize(text: string): string[] {
@@ -146,26 +168,34 @@ function tokenize(text: string): string[] {
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+    .filter((w) => (w.length > 2 || SHORT_ALLOWLIST.has(w)) && !STOP_WORDS.has(w));
 }
 
 /**
  * Build the set of terms that represent this candidate.
- * Includes multi-word phrases (kept intact) AND individual word tokens.
+ * Skills and industries are kept as multi-word phrases AND individual tokens.
+ * currentTitle contributes only its MODIFIER tokens (seniority/role words stripped).
+ * careerGoals and summary contribute individual tokens.
  */
 function buildCandidateTerms(profile: CandidateProfile): string[] {
   const terms = new Set<string>();
 
   const addPhrase = (phrase: string) => {
     const lower = phrase.toLowerCase().trim();
-    if (lower.length > 2) terms.add(lower);
-    // Also add individual tokens so "content marketing" also fires on "content"
+    if (lower.length > 2 || SHORT_ALLOWLIST.has(lower)) terms.add(lower);
     for (const w of tokenize(lower)) terms.add(w);
   };
 
+  // Skills are the highest-signal source — keep as phrases + tokens
   for (const s of profile.skills ?? []) addPhrase(s);
+  // Industries as phrases + tokens
   for (const i of profile.industries ?? []) addPhrase(i);
-  if (profile.currentTitle) for (const w of tokenize(profile.currentTitle)) terms.add(w);
+  // currentTitle: tokenize runs through STOP_WORDS which now includes generic
+  // role words, so "GTM Engineer" → "gtm" only (not "engineer")
+  if (profile.currentTitle) {
+    for (const w of tokenize(profile.currentTitle)) terms.add(w);
+  }
+  // careerGoals and summary
   if (profile.careerGoals) for (const w of tokenize(profile.careerGoals)) terms.add(w);
   if (profile.summary) for (const w of tokenize(profile.summary)) terms.add(w);
 
