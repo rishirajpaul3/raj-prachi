@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+:root {
+  --raj-primary: #D97706;
+  --raj-surface: #FFF8F0;
+  --prachi-primary: #1E3A5F;
+  --prachi-surface: #F0F4F8;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Smooth scroll for chat thread */
+.chat-scroll {
+  scroll-behavior: smooth;
+}
+
+/* Bounce animation for typing indicator dots */
+@keyframes bounce-dot {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-4px); }
+}

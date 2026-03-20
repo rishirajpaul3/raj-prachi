@@ -1,0 +1,311 @@
+import { NextRequest, NextResponse } from "next/server";
+import { auth } from "@/lib/auth";
+import { db } from "@/lib/db";
+import { conversations, messages, candidates } from "@/lib/db/schema";
+import { eq, and, asc } from "drizzle-orm";
+import { RAJ_SYSTEM_PROMPT, RAJ_TOOLS, createRajClient } from "@/lib/agents/raj";
+import {
+  updateCandidateProfile,
+  searchJobs,
+  recordSwipe,
+  runMockInterview,
+  giveInterviewFeedback,
+  salaryBenchmark,
+} from "@/lib/tools/raj-tools";
+import type OpenAI from "openai";
+
+const MAX_TOOL_CALLS = 10;
+
+type GroqMessage = OpenAI.Chat.ChatCompletionMessageParam;
+
+// OpenAI v6 union-types tool calls; narrow to function calls only
+type FunctionToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
+
+export async function POST(req: NextRequest) {
+  try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const userId = session.user.id;
+    const userType = (session.user as { type?: string }).type;
+
+    if (userType !== "seeker") {
+      return NextResponse.json(
+        { error: "Only job seekers can talk to Raj" },
+        { status: 403 }
+      );
+    }
+
+    const { message, conversationId } = (await req.json()) as {
+      message: string;
+      conversationId?: string;
+    };
+
+    if (!message?.trim()) {
+      return NextResponse.json({ error: "Message is required" }, { status: 400 });
+    }
+
+    // Get or create the main Raj conversation for this user
+    let conversation;
+    if (conversationId) {
+      const [found] = await db
+        .select()
+        .from(conversations)
+        .where(
+          and(
+            eq(conversations.id, conversationId),
+            eq(conversations.userId, userId)
+          )
+        )
+        .limit(1);
+      conversation = found;
+    }
+
+    if (!conversation) {
+      const [created] = await db
+        .insert(conversations)
+        .values({ userId, agent: "raj" })
+        .returning();
+      conversation = created;
+    }
+
+    if (!conversation) {
+      return NextResponse.json(
+        { error: "Failed to get conversation" },
+        { status: 500 }
+      );
+    }
+
+    // Load conversation history
+    const history = await db
+      .select()
+      .from(messages)
+      .where(eq(messages.conversationId, conversation.id))
+      .orderBy(asc(messages.createdAt));
+
+    // Build Groq message array from DB history
+    const groqMessages: GroqMessage[] = buildGroqMessages(history);
+
+    // Save the incoming user message
+    await db.insert(messages).values({
+      conversationId: conversation.id,
+      role: "user",
+      content: message,
+    });
+
+    groqMessages.push({ role: "user", content: message });
+
+    // Inject candidate profile context into the system prompt
+    const [candidate] = await db
+      .select()
+      .from(candidates)
+      .where(eq(candidates.userId, userId))
+      .limit(1);
+
+    const profileContext = candidate
+      ? `\n\nCandidate profile: ${candidate.profile}`
+      : "\n\nThis is a new candidate with no profile yet.";
+
+    // ─── Server-side agentic loop ─────────────────────────────────────────────
+    const client = createRajClient();
+    let toolCallCount = 0;
+    let finalResponse = "";
+
+    while (toolCallCount < MAX_TOOL_CALLS) {
+      const response = await client.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        max_tokens: 1024,
+        messages: [
+          { role: "system", content: RAJ_SYSTEM_PROMPT + profileContext },
+          ...groqMessages,
+        ],
+        tools: RAJ_TOOLS,
+        tool_choice: "auto",
+      });
+
+      const choice = response.choices[0];
+      if (!choice) break;
+
+      if (choice.finish_reason === "stop") {
+        finalResponse = choice.message.content ?? "";
+        break;
+      }
+
+      if (choice.finish_reason === "tool_calls") {
+        const toolCalls = (choice.message.tool_calls ?? []).filter(
+          (tc): tc is FunctionToolCall => tc.type === "function"
+        );
+
+        // Add assistant message (with tool_calls) to in-memory history
+        groqMessages.push({
+          role: "assistant",
+          content: choice.message.content,
+          tool_calls: toolCalls,
+        });
+
+        // Persist assistant turn to DB — serialize tool_calls so history can be rebuilt
+        await db.insert(messages).values({
+          conversationId: conversation.id,
+          role: "assistant",
+          content: JSON.stringify({
+            tool_calls: toolCalls,
+            text: choice.message.content,
+          }),
+        });
+
+        // Execute each tool call and feed results back
+        for (const toolCall of toolCalls) {
+          toolCallCount++;
+          const args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
+          const result = await executeRajTool(toolCall.function.name, args, userId);
+
+          // Persist tool result
+          await db.insert(messages).values({
+            conversationId: conversation.id,
+            role: "tool",
+            content: JSON.stringify(result),
+            toolName: toolCall.function.name,
+            toolUseId: toolCall.id,
+          });
+
+          // Add tool result to in-memory history
+          groqMessages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(result),
+          });
+        }
+
+        continue;
+      }
+
+      // Unexpected finish_reason
+      break;
+    }
+
+    if (toolCallCount >= MAX_TOOL_CALLS) {
+      finalResponse =
+        "I'm having a bit of trouble completing that request right now. Could you try rephrasing, or let me know what you were looking for?";
+    }
+
+    if (!finalResponse) {
+      finalResponse = "I'm here — what would you like to explore?";
+    }
+
+    // Save final assistant response
+    await db.insert(messages).values({
+      conversationId: conversation.id,
+      role: "assistant",
+      content: finalResponse,
+    });
+
+    return NextResponse.json({
+      message: finalResponse,
+      conversationId: conversation.id,
+    });
+  } catch (err) {
+    console.error("Raj agent error:", err);
+    return NextResponse.json(
+      {
+        error:
+          "Raj is having trouble connecting right now. Please try again in a moment.",
+      },
+      { status: 500 }
+    );
+  }
+}
+
+// ─── Tool dispatcher ──────────────────────────────────────────────────────────
+
+async function executeRajTool(
+  name: string,
+  args: Record<string, unknown>,
+  userId: string
+): Promise<unknown> {
+  switch (name) {
+    case "update_candidate_profile":
+      return updateCandidateProfile(userId, args.fields);
+
+    case "search_jobs":
+      return searchJobs(
+        userId,
+        args.filters as Parameters<typeof searchJobs>[1]
+      );
+
+    case "record_swipe":
+      return recordSwipe(
+        userId,
+        args.role_id as string,
+        args.direction as "yes" | "no",
+        args.raj_reason as string | undefined
+      );
+
+    case "run_mock_interview":
+      return runMockInterview(userId, args.role_id as string);
+
+    case "give_interview_feedback":
+      return giveInterviewFeedback(args.conversation_id as string);
+
+    case "salary_benchmark":
+      return salaryBenchmark(
+        args.role as string,
+        args.level as string,
+        args.location as string
+      );
+
+    default:
+      return { success: false, error: `Unknown tool: ${name}` };
+  }
+}
+
+// ─── History builder ──────────────────────────────────────────────────────────
+
+function buildGroqMessages(
+  dbMessages: Array<{
+    role: string;
+    content: string;
+    toolName: string | null;
+    toolUseId: string | null;
+  }>
+): GroqMessage[] {
+  const result: GroqMessage[] = [];
+
+  for (const msg of dbMessages) {
+    if (msg.role === "user") {
+      result.push({ role: "user", content: msg.content });
+    } else if (msg.role === "assistant") {
+      // Tool-call assistant messages are stored as JSON; detect and reconstruct
+      try {
+        const parsed = JSON.parse(msg.content) as {
+          tool_calls?: FunctionToolCall[];
+          text?: string | null;
+        };
+        if (parsed.tool_calls) {
+          result.push({
+            role: "assistant",
+            content: parsed.text ?? null,
+            tool_calls: parsed.tool_calls,
+          });
+          continue;
+        }
+      } catch {
+        // Not JSON — plain text assistant message
+      }
+      result.push({ role: "assistant", content: msg.content });
+    } else if (msg.role === "tool" && msg.toolUseId) {
+      result.push({
+        role: "tool",
+        tool_call_id: msg.toolUseId,
+        content: msg.content,
+      });
+    }
+  }
+
+  return result;
+}
