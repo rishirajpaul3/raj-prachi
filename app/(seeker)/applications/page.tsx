@@ -1,7 +1,7 @@
 import { requireSession } from "@/lib/session";
 import { db } from "@/lib/db";
 import { candidates, jobSwipes, roles, employers } from "@/lib/db/schema";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, inArray } from "drizzle-orm";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -48,41 +48,48 @@ export default async function ApplicationsPage() {
     );
   }
 
-  // Enrich with role data
-  const enriched = await Promise.all(
-    swipes.map(async (swipe) => {
-      const [role] = await db
-        .select()
-        .from(roles)
-        .where(eq(roles.id, swipe.roleId))
-        .limit(1);
+  // Batch-fetch all roles in one query
+  const roleIds = swipes.map((s) => s.roleId);
+  const roleRows = await db.select().from(roles).where(inArray(roles.id, roleIds));
+  const roleMap = new Map(roleRows.map((r) => [r.id, r]));
 
+  // Batch-fetch employer names for roles that need it
+  const missingEmployerIds = [
+    ...new Set(
+      roleRows
+        .filter((r) => !r.companyName && r.employerId)
+        .map((r) => r.employerId as string)
+    ),
+  ];
+  const employerMap = new Map<string, string>();
+  if (missingEmployerIds.length > 0) {
+    const employerRows = await db
+      .select({ id: employers.id, companyName: employers.companyName })
+      .from(employers)
+      .where(inArray(employers.id, missingEmployerIds));
+    for (const e of employerRows) employerMap.set(e.id, e.companyName);
+  }
+
+  const jobs = swipes
+    .map((swipe) => {
+      const role = roleMap.get(swipe.roleId);
       if (!role) return null;
-
-      let companyName = role.companyName;
-      if (!companyName && role.employerId) {
-        const [employer] = await db
-          .select({ companyName: employers.companyName })
-          .from(employers)
-          .where(eq(employers.id, role.employerId))
-          .limit(1);
-        companyName = employer?.companyName ?? null;
-      }
-
+      const companyName =
+        role.companyName ??
+        (role.employerId ? employerMap.get(role.employerId) : undefined) ??
+        "Unknown Company";
       return {
         swipeId: swipe.id,
         roleId: role.id,
         title: role.title,
-        companyName: companyName ?? "Unknown Company",
+        companyName,
         applyUrl: role.applyUrl,
         logoUrl: role.logoUrl,
         swipedAt: swipe.createdAt,
         rajReason: swipe.rajReason,
       };
     })
-  );
-
-  const jobs = enriched.filter(Boolean) as NonNullable<(typeof enriched)[number]>[];
+    .filter((j): j is NonNullable<typeof j> => j !== null);
 
   return (
     <div className="h-full overflow-y-auto pb-24">
@@ -100,18 +107,9 @@ export default async function ApplicationsPage() {
               className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4"
             >
               <div className="flex items-start gap-3">
-                {job.logoUrl ? (
-                  <img
-                    src={job.logoUrl}
-                    alt={job.companyName}
-                    className="w-10 h-10 rounded-lg object-contain bg-gray-50 border border-gray-100 flex-shrink-0"
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-                  />
-                ) : (
-                  <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center text-amber-700 font-bold text-sm flex-shrink-0">
-                    {job.companyName[0]}
-                  </div>
-                )}
+                <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center text-amber-700 font-bold text-sm flex-shrink-0">
+                  {job.companyName[0]}
+                </div>
                 <div className="flex-1 min-w-0">
                   <h3 className="font-semibold text-gray-900 text-sm truncate">{job.title}</h3>
                   <p className="text-amber-700 text-xs">{job.companyName}</p>
