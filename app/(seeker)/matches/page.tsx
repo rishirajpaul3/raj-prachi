@@ -1,22 +1,17 @@
-import { auth } from "@/lib/auth";
-import { redirect } from "next/navigation";
+import { requireSession } from "@/lib/session";
 import { db } from "@/lib/db";
 import {
   notifications,
   matches,
   roles,
   employers,
-  candidates,
 } from "@/lib/db/schema";
 import { eq, and, desc } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
 export default async function SeekerMatchesPage() {
-  const session = await auth();
-  if (!session?.user?.id) redirect("/login");
-
-  const userId = session.user.id;
+  const userId = await requireSession();
 
   // Get all notifications for this user, ordered newest first
   const userNotifications = await db
@@ -50,19 +45,21 @@ export default async function SeekerMatchesPage() {
         .where(eq(roles.id, match.roleId))
         .limit(1);
 
-      const [employer] = role
-        ? await db
-            .select()
-            .from(employers)
-            .where(eq(employers.id, role.employerId))
-            .limit(1)
-        : [null];
+      let companyName = role?.companyName ?? null;
+      if (!companyName && role?.employerId) {
+        const [employer] = await db
+          .select({ companyName: employers.companyName })
+          .from(employers)
+          .where(eq(employers.id, role.employerId))
+          .limit(1);
+        companyName = employer?.companyName ?? null;
+      }
 
       return {
         notificationId: notif.id,
         matchId: match.id,
         roleTitle: role?.title ?? "Unknown Role",
-        companyName: employer?.companyName ?? "Unknown Company",
+        companyName: companyName ?? "Unknown Company",
         introText: match.introText ?? notif.text,
         matchedAt: match.matchedAt,
         isNew: !notif.readAt,

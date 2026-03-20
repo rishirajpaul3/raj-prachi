@@ -7,6 +7,24 @@ interface ChatBubbleProps {
   isInterviewMode?: boolean;
 }
 
+/** Render a line with **bold** spans. */
+function renderLine(line: string, key: number) {
+  const parts = line.split(/(\*\*[^*]+\*\*)/g);
+  return (
+    <span key={key}>
+      {parts.map((part, i) =>
+        part.startsWith("**") && part.endsWith("**") ? (
+          <strong key={i} className="font-semibold">
+            {part.slice(2, -2)}
+          </strong>
+        ) : (
+          part
+        )
+      )}
+    </span>
+  );
+}
+
 export function ChatBubble({
   role,
   content,
@@ -14,28 +32,38 @@ export function ChatBubble({
   isInterviewMode = false,
 }: ChatBubbleProps) {
   const isUser = role === "user";
+  const lines = content.split("\n");
 
   return (
     <div
       className={cn(
-        "flex gap-3 mb-4",
+        "flex gap-2.5 mb-4 animate-in fade-in slide-in-from-bottom-2 duration-200",
         isUser ? "flex-row-reverse" : "flex-row"
       )}
     >
-      {!isUser && (
+      {/* Avatar */}
+      {!isUser ? (
         <div
           className={cn(
-            "w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold flex-shrink-0 mt-1",
+            "w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-1",
             agent === "raj" ? "bg-amber-600" : "bg-[#1E3A5F]"
           )}
           aria-hidden="true"
         >
           {agent === "raj" ? "R" : "P"}
         </div>
+      ) : (
+        <div
+          className="w-7 h-7 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-xs font-bold flex-shrink-0 mt-1"
+          aria-hidden="true"
+        >
+          Y
+        </div>
       )}
+
       <div
         className={cn(
-          "max-w-[80%] px-4 py-3 rounded-2xl text-sm leading-relaxed",
+          "max-w-[78%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed",
           isUser
             ? "bg-white text-gray-900 border border-gray-200 rounded-tr-sm"
             : agent === "raj"
@@ -47,11 +75,10 @@ export function ChatBubble({
           isInterviewMode && !isUser && "shadow-sm"
         )}
       >
-        {/* Render newlines as line breaks */}
-        {content.split("\n").map((line, i) => (
+        {lines.map((line, i) => (
           <span key={i}>
-            {line}
-            {i < content.split("\n").length - 1 && <br />}
+            {renderLine(line, i)}
+            {i < lines.length - 1 && <br />}
           </span>
         ))}
       </div>

@@ -1,5 +1,4 @@
-import { auth } from "@/lib/auth";
-import { redirect } from "next/navigation";
+import { requireSession } from "@/lib/session";
 import { db } from "@/lib/db";
 import { candidates, roles, jobSwipes, employers } from "@/lib/db/schema";
 import { eq, and, notInArray } from "drizzle-orm";
@@ -8,10 +7,7 @@ import Link from "next/link";
 import type { CandidateProfile } from "@/lib/types";
 
 export default async function JobsPage() {
-  const session = await auth();
-  if (!session?.user?.id) redirect("/login");
-
-  const userId = session.user.id;
+  const userId = await requireSession();
 
   const [candidate] = await db
     .select()
@@ -19,7 +15,26 @@ export default async function JobsPage() {
     .where(eq(candidates.userId, userId))
     .limit(1);
 
-  if (!candidate) redirect("/chat");
+  if (!candidate) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-4 px-6 text-center pb-16">
+        <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center text-2xl">
+          💬
+        </div>
+        <h2 className="font-semibold text-gray-900">Chat with Raj first</h2>
+        <p className="text-sm text-gray-500">
+          Raj needs to learn about you before he can find the right jobs.
+          Start a conversation and he&apos;ll surface matches once he has a sense of what you&apos;re looking for.
+        </p>
+        <Link
+          href="/chat"
+          className="px-5 py-2.5 bg-amber-600 text-white rounded-xl text-sm font-medium hover:bg-amber-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2"
+        >
+          Talk to Raj
+        </Link>
+      </div>
+    );
+  }
 
   const profile = JSON.parse(candidate.profile) as CandidateProfile;
   const hasProfile = Object.keys(profile).length > 0;
@@ -85,21 +100,25 @@ export default async function JobsPage() {
       if (profile.salaryMin && req.salaryMax && profile.salaryMin <= req.salaryMax) score += 15;
       if (profile.remotePreference === "remote" && req.remote) score += 20;
 
-      const [employer] = await db
-        .select({ companyName: employers.companyName })
-        .from(employers)
-        .where(eq(employers.id, role.employerId))
-        .limit(1);
+      // External jobs store companyName directly; internal roles use employer table
+      let companyName = role.companyName;
+      if (!companyName && role.employerId) {
+        const [employer] = await db
+          .select({ companyName: employers.companyName })
+          .from(employers)
+          .where(eq(employers.id, role.employerId))
+          .limit(1);
+        companyName = employer?.companyName ?? null;
+      }
 
       return {
         id: role.id,
         title: role.title,
         description: role.description,
-        companyName: employer?.companyName ?? "Unknown Company",
+        companyName: companyName ?? "Unknown Company",
         requirements: req,
         score,
         matchedSkills: matched,
-        // Raj's voice: generated based on profile/role match
         rajReason: generateRajReason(role.title, matched, req.remote ?? false, profile),
       };
     })

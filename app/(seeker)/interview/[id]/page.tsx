@@ -1,5 +1,5 @@
-import { auth } from "@/lib/auth";
-import { redirect, notFound } from "next/navigation";
+import { requireSession } from "@/lib/session";
+import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
 import { conversations, messages, roles } from "@/lib/db/schema";
 import { eq, and, asc } from "drizzle-orm";
@@ -11,10 +11,7 @@ interface Props {
 
 export default async function InterviewPage({ params }: Props) {
   const { id } = await params;
-  const session = await auth();
-  if (!session?.user?.id) redirect("/login");
-
-  const userId = session.user.id;
+  const userId = await requireSession();
 
   const [conversation] = await db
     .select()
@@ -53,7 +50,6 @@ export default async function InterviewPage({ params }: Props) {
       content: m.content,
     }));
 
-  // If no messages yet, Raj opens with first interview question
   if (initialMessages.length === 0) {
     initialMessages.push({
       id: "interview-start",

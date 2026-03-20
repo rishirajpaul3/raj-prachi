@@ -1,15 +1,23 @@
-import { auth } from "@/lib/auth";
-import { redirect } from "next/navigation";
+import { requireSession } from "@/lib/session";
 import { db } from "@/lib/db";
 import { conversations, messages, candidates } from "@/lib/db/schema";
 import { eq, and, asc } from "drizzle-orm";
 import { ChatThread } from "@/components/chat/ChatThread";
+import { CallButton } from "@/components/voice/CallButton";
+
+/** Strip tool-call JSON blobs — only return the visible text, or null to skip the turn. */
+function visibleContent(content: string): string | null {
+  try {
+    const parsed = JSON.parse(content) as { tool_calls?: unknown; text?: string | null };
+    if (parsed.tool_calls !== undefined) return parsed.text?.trim() || null;
+  } catch {
+    // not JSON
+  }
+  return content;
+}
 
 export default async function RajChatPage() {
-  const session = await auth();
-  if (!session?.user?.id) redirect("/login");
-
-  const userId = session.user.id;
+  const userId = await requireSession();
 
   // Load or detect existing conversation
   const [conversation] = await db
@@ -41,19 +49,22 @@ export default async function RajChatPage() {
     .where(eq(candidates.userId, userId))
     .limit(1);
 
-  const profile = candidate ? JSON.parse(candidate.profile) as Record<string, unknown> : {};
-  const isNewUser = Object.keys(profile).length === 0 && history.length === 0;
+  const profile = candidate
+    ? (JSON.parse(candidate.profile) as Record<string, unknown>)
+    : {};
 
-  // Opening message for new users — Raj speaks first
+  // Build clean message list — skip tool turns and strip tool_call JSON blobs
   const initialMessages = history
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({
-      id: m.id,
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    }));
+    .flatMap((m) => {
+      const content = visibleContent(m.content);
+      if (!content) return [];
+      return [{ id: m.id, role: m.role as "user" | "assistant", content }];
+    });
 
-  if (isNewUser && initialMessages.length === 0) {
+  const isNewUser = Object.keys(profile).length === 0 && initialMessages.length === 0;
+
+  if (isNewUser) {
     initialMessages.push({
       id: "intro",
       role: "assistant",
@@ -63,17 +74,20 @@ export default async function RajChatPage() {
         `\n\nTo start: what do you do, and what are you looking for next?`,
     });
   } else if (!isNewUser && initialMessages.length === 0) {
-    // Returning user, no messages yet in this session
-    const name = session.user.name ?? session.user.email?.split("@")[0] ?? "";
     initialMessages.push({
       id: "return",
       role: "assistant",
-      content: `Welcome back${name ? `, ${name}` : ""}! Want to keep exploring jobs, or is there something new I can help with?`,
+      content: `Welcome back! Want to keep exploring jobs, or is there something new I can help with?`,
     });
   }
 
   return (
     <div className="h-full flex flex-col">
+      {/* Call Raj button */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-white">
+        <p className="text-sm font-semibold text-gray-900">Raj</p>
+        <CallButton agent="raj" agentName="Raj" />
+      </div>
       <ChatThread
         agent="raj"
         initialMessages={initialMessages}

@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { ChatBubble } from "./ChatBubble";
 import { TypingIndicator } from "./TypingIndicator";
+import { useRouter } from "next/navigation";
 
 interface Message {
   id: string;
@@ -16,6 +17,10 @@ interface ChatThreadProps {
   conversationId?: string;
   isInterviewMode?: boolean;
   placeholder?: string;
+  /** If set, this message is sent automatically on mount (used by prep page) */
+  autoTriggerMessage?: string;
+  /** Role ID passed to Prachi for job-specific conversations */
+  roleId?: string;
 }
 
 export function ChatThread({
@@ -24,12 +29,16 @@ export function ChatThread({
   conversationId: initialConversationId,
   isInterviewMode = false,
   placeholder,
+  autoTriggerMessage,
+  roleId,
 }: ChatThreadProps) {
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [conversationId, setConversationId] = useState(initialConversationId);
   const [error, setError] = useState<string | null>(null);
+  const autoTriggered = useRef(false);
+  const router = useRouter();
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -39,11 +48,11 @@ export function ChatThread({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
-  const sendMessage = async () => {
-    const text = input.trim();
+  const sendMessage = async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     if (!text || isLoading) return;
 
-    setInput("");
+    if (!overrideText) setInput("");
     setError(null);
 
     const userMsg: Message = {
@@ -56,10 +65,13 @@ export function ChatThread({
 
     try {
       const endpoint = agent === "raj" ? "/api/agents/raj" : "/api/agents/prachi";
+      const body: Record<string, unknown> = { message: text, conversationId };
+      if (roleId) body.roleId = roleId;
+
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, conversationId }),
+        body: JSON.stringify(body),
       });
 
       if (!res.ok) {
@@ -92,6 +104,15 @@ export function ChatThread({
     }
   };
 
+  // Auto-trigger initial message on mount (prep page flow)
+  useEffect(() => {
+    if (autoTriggerMessage && !autoTriggered.current && messages.length === 0) {
+      autoTriggered.current = true;
+      sendMessage(autoTriggerMessage);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -100,9 +121,14 @@ export function ChatThread({
   };
 
   const defaultPlaceholder =
-    agent === "raj"
-      ? "Message Raj..."
-      : "Message Prachi...";
+    agent === "raj" ? "Message Raj..." : "Message Prachi...";
+
+  const newChat = () => {
+    setMessages([]);
+    setConversationId(undefined);
+    setError(null);
+    router.refresh();
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -139,6 +165,18 @@ export function ChatThread({
       {/* Input area */}
       <div className="border-t border-gray-100 px-4 py-3 bg-white">
         <div className="flex gap-2 items-end">
+          {/* New chat button */}
+          <button
+            onClick={newChat}
+            className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+            title="New chat"
+            aria-label="Start new chat"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+              <path d="M5.433 13.917l1.262-3.155A4 4 0 017.58 9.42l6.92-6.918a2.121 2.121 0 013 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 01-.65-.65z" />
+              <path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0010 3H4.75A2.75 2.75 0 002 5.75v9.5A2.75 2.75 0 004.75 18h9.5A2.75 2.75 0 0017 15.25V10a.75.75 0 00-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5z" />
+            </svg>
+          </button>
           <textarea
             ref={inputRef}
             value={input}
@@ -156,7 +194,7 @@ export function ChatThread({
             aria-label="Message input"
           />
           <button
-            onClick={sendMessage}
+            onClick={() => sendMessage()}
             disabled={!input.trim() || isLoading}
             className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition-colors disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${
               agent === "raj"
@@ -176,6 +214,7 @@ export function ChatThread({
             </svg>
           </button>
         </div>
+
         <p className="text-xs text-gray-400 mt-1.5 text-center">
           Press Enter to send · Shift+Enter for new line
         </p>

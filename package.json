@@ -18,6 +18,7 @@
     "@neondatabase/serverless": "^1.0.2",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.1",
+    "fast-xml-parser": "^5.5.7",
     "next": "15",
     "next-auth": "^5.0.0-beta.30",
     "openai": "^6.32.0",

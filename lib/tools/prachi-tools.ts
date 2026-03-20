@@ -1,370 +1,187 @@
 /**
- * Prachi's tool implementations.
- * These are plain server-side functions — NOT HTTP endpoints.
- * Only the Prachi agent API route calls them, server-side.
+ * Prachi's tool implementations — seeker-focused hiring intelligence.
+ * Server-side only. Called exclusively from the Prachi agent API route.
  */
 
 import { db } from "@/lib/db";
-import {
-  candidates,
-  employers,
-  roles,
-  employerInterests,
-  jobSwipes,
-  users,
-} from "@/lib/db/schema";
-import {
-  RoleRequirementsSchema,
-  type ToolResult,
-  type ScoredCandidate,
-  type CandidateProfile,
-  type RoleRequirements,
-} from "@/lib/types";
+import { candidates, roles, employers } from "@/lib/db/schema";
+import { type ToolResult, type CandidateProfile, type RoleRequirements } from "@/lib/types";
 import { eq, and } from "drizzle-orm";
-import { checkMutualMatch } from "@/lib/tools/match";
 
-// ─── Tool: create_role ────────────────────────────────────────────────────────
+// ─── Tool: get_job_details ────────────────────────────────────────────────────
 
-export async function createRole(
-  userId: string,
-  details: {
-    title: string;
-    description?: string;
-    requirements?: unknown;
-  }
-): Promise<ToolResult> {
-  const [employer] = await db
-    .select()
-    .from(employers)
-    .where(eq(employers.userId, userId))
-    .limit(1);
-
-  if (!employer) {
-    return { success: false, error: "Employer profile not found" };
-  }
-
-  if (!details.title) {
-    return { success: false, error: "Role title is required" };
-  }
-
-  const parsed = details.requirements
-    ? RoleRequirementsSchema.safeParse(details.requirements)
-    : { success: true, data: {} };
-
-  if (!parsed.success) {
-    return {
-      success: false,
-      error: `Invalid requirements: ${(parsed as { error: { message: string } }).error.message}`,
-    };
-  }
-
-  const [role] = await db
-    .insert(roles)
-    .values({
-      employerId: employer.id,
-      title: details.title,
-      description: details.description ?? "",
-      requirements: JSON.stringify(parsed.data),
-    })
-    .returning();
-
-  if (!role) {
-    return { success: false, error: "Failed to create role" };
-  }
-
-  return {
-    success: true,
-    data: { roleId: role.id, title: role.title, message: `Role "${role.title}" created successfully.` },
-  };
-}
-
-// ─── Tool: update_role ────────────────────────────────────────────────────────
-
-export async function updateRole(
-  userId: string,
-  roleId: string,
-  updates: {
-    title?: string;
-    description?: string;
-    requirements?: unknown;
-  }
-): Promise<ToolResult> {
-  const [employer] = await db
-    .select()
-    .from(employers)
-    .where(eq(employers.userId, userId))
-    .limit(1);
-
-  if (!employer) {
-    return { success: false, error: "Employer not found" };
-  }
-
+export async function getJobDetails(roleId: string): Promise<ToolResult> {
   const [role] = await db
     .select()
     .from(roles)
-    .where(and(eq(roles.id, roleId), eq(roles.employerId, employer.id)))
+    .where(and(eq(roles.id, roleId), eq(roles.isActive, true)))
     .limit(1);
 
   if (!role) {
-    return { success: false, error: "Role not found or not owned by you" };
+    return { success: false, error: "Job not found" };
   }
 
-  const existingReqs = JSON.parse(role.requirements) as RoleRequirements;
-  let mergedRequirements = existingReqs;
-
-  if (updates.requirements) {
-    const parsed = RoleRequirementsSchema.safeParse(updates.requirements);
-    if (!parsed.success) {
-      return { success: false, error: `Invalid requirements: ${parsed.error.message}` };
-    }
-    mergedRequirements = { ...existingReqs, ...parsed.data };
-  }
-
-  await db
-    .update(roles)
-    .set({
-      title: updates.title ?? role.title,
-      description: updates.description ?? role.description,
-      requirements: JSON.stringify(mergedRequirements),
-    })
-    .where(eq(roles.id, roleId));
-
-  return { success: true, data: { roleId, message: "Role updated." } };
-}
-
-// ─── Tool: find_candidates ────────────────────────────────────────────────────
-
-export async function findCandidates(
-  userId: string,
-  roleId: string,
-  limit = 10
-): Promise<ToolResult> {
-  const [employer] = await db
-    .select()
-    .from(employers)
-    .where(eq(employers.userId, userId))
-    .limit(1);
-
-  if (!employer) {
-    return { success: false, error: "Employer not found" };
-  }
-
-  const [role] = await db
-    .select()
-    .from(roles)
-    .where(and(eq(roles.id, roleId), eq(roles.employerId, employer.id)))
-    .limit(1);
-
-  if (!role) {
-    return { success: false, error: "Role not found" };
+  // Resolve company name: use role.companyName for external jobs, employer record for internal
+  let companyName = role.companyName;
+  if (!companyName && role.employerId) {
+    const [employer] = await db
+      .select({ companyName: employers.companyName })
+      .from(employers)
+      .where(eq(employers.id, role.employerId))
+      .limit(1);
+    companyName = employer?.companyName ?? null;
   }
 
   const requirements = JSON.parse(role.requirements) as RoleRequirements;
 
-  // Get candidates already marked as interested (to exclude from fresh results)
-  const alreadyInterested = await db
-    .select({ candidateId: employerInterests.candidateId })
-    .from(employerInterests)
-    .where(eq(employerInterests.roleId, roleId));
-
-  const excludeIds = alreadyInterested.map((i) => i.candidateId);
-
-  // Fetch all active candidates (for learning project scale)
-  const allCandidates = await db.select().from(candidates);
-
-  // Score candidates by SQL-based skill matching
-  const scored: ScoredCandidate[] = allCandidates
-    .filter((c) => !excludeIds.includes(c.id))
-    .map((candidate) => {
-      const profile = JSON.parse(candidate.profile) as CandidateProfile;
-      let score = 0;
-      const matchReasons: string[] = [];
-
-      // Skill overlap
-      const candidateSkills = (profile.skills ?? []).map((s) => s.toLowerCase());
-      const requiredSkills = (requirements.skills ?? []).map((s) => s.toLowerCase());
-      const mustHave = (requirements.mustHave ?? []).map((s) => s.toLowerCase());
-
-      const overlap = candidateSkills.filter((s) => requiredSkills.includes(s));
-      if (overlap.length > 0) {
-        score += overlap.length * 10;
-        matchReasons.push(`${overlap.length} matching skill${overlap.length > 1 ? "s" : ""}: ${overlap.slice(0, 3).join(", ")}`);
-      }
-
-      // Must-have skills
-      const hasMustHave = mustHave.every((s) => candidateSkills.includes(s));
-      if (mustHave.length > 0 && hasMustHave) {
-        score += 30;
-        matchReasons.push("Has all required skills");
-      } else if (mustHave.length > 0 && !hasMustHave) {
-        score -= 20; // penalize missing must-haves
-      }
-
-      // Experience match
-      if (requirements.minYearsExperience !== undefined && profile.yearsOfExperience !== undefined) {
-        if (profile.yearsOfExperience >= requirements.minYearsExperience) {
-          score += 15;
-          matchReasons.push(`${profile.yearsOfExperience} years experience`);
-        }
-      }
-
-      // Salary compatibility
-      if (requirements.salaryMax !== undefined && profile.salaryMin !== undefined) {
-        if (profile.salaryMin <= requirements.salaryMax) {
-          score += 10;
-          matchReasons.push("Salary expectations compatible");
-        } else {
-          score -= 15;
-        }
-      }
-
-      // Remote preference match
-      if (requirements.remote === true && profile.remotePreference === "remote") {
-        score += 10;
-        matchReasons.push("Remote preference aligned");
-      }
-
-      return {
-        candidateId: candidate.id,
-        userId: candidate.userId,
-        profile,
-        score,
-        matchReasons,
-      };
-    })
-    .filter((c) => c.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
-
-  // Enrich with user email
-  const enriched = await Promise.all(
-    scored.map(async (c) => {
-      const [user] = await db
-        .select({ email: users.email, name: users.name })
-        .from(users)
-        .where(eq(users.id, c.userId))
-        .limit(1);
-      return { ...c, email: user?.email, name: user?.name };
-    })
-  );
-
   return {
     success: true,
-    data: { candidates: enriched, total: enriched.length },
+    data: {
+      id: role.id,
+      title: role.title,
+      companyName: companyName ?? "Unknown Company",
+      description: role.description,
+      requirements,
+      applyUrl: role.applyUrl,
+      source: role.source,
+    },
   };
 }
 
-// ─── Tool: record_employer_interest ──────────────────────────────────────────
+// ─── Tool: get_candidate_profile ──────────────────────────────────────────────
 
-export async function recordEmployerInterest(
-  userId: string,
-  roleId: string,
-  candidateId: string
-): Promise<ToolResult> {
-  const [employer] = await db
-    .select()
-    .from(employers)
-    .where(eq(employers.userId, userId))
-    .limit(1);
-
-  if (!employer) {
-    return { success: false, error: "Employer not found" };
-  }
-
-  // Verify role belongs to this employer
-  const [role] = await db
-    .select()
-    .from(roles)
-    .where(and(eq(roles.id, roleId), eq(roles.employerId, employer.id)))
-    .limit(1);
-
-  if (!role) {
-    return { success: false, error: "Role not found or not owned by you" };
-  }
-
-  // Idempotency: check for existing interest
-  const [existing] = await db
-    .select()
-    .from(employerInterests)
-    .where(
-      and(
-        eq(employerInterests.roleId, roleId),
-        eq(employerInterests.candidateId, candidateId)
-      )
-    )
-    .limit(1);
-
-  if (existing) {
-    return { success: true, data: { alreadyInterested: true } };
-  }
-
-  await db.insert(employerInterests).values({ roleId, candidateId });
-
-  // Get the candidate's user ID for match notification
+export async function getCandidateProfile(userId: string): Promise<ToolResult> {
   const [candidate] = await db
-    .select({ userId: candidates.userId })
+    .select()
     .from(candidates)
-    .where(eq(candidates.id, candidateId))
+    .where(eq(candidates.userId, userId))
+    .limit(1);
+
+  if (!candidate) {
+    return { success: false, error: "Candidate profile not found" };
+  }
+
+  const profile = JSON.parse(candidate.profile) as CandidateProfile;
+
+  return {
+    success: true,
+    data: { profile },
+  };
+}
+
+// ─── Tool: analyze_fit ────────────────────────────────────────────────────────
+
+export async function analyzeFit(
+  userId: string,
+  roleId: string
+): Promise<ToolResult> {
+  const [candidate] = await db
+    .select()
+    .from(candidates)
+    .where(eq(candidates.userId, userId))
     .limit(1);
 
   if (!candidate) {
     return { success: false, error: "Candidate not found" };
   }
 
-  // Check for mutual match (employer-first path)
-  const matchResult = await checkMutualMatch(
-    candidateId,
-    roleId,
-    candidate.userId
-  );
-
-  if (matchResult.matched) {
-    return {
-      success: true,
-      data: {
-        match: true,
-        matchId: matchResult.matchId,
-        message: "It's a match! Sending warm introduction to both parties.",
-      },
-    };
-  }
-
-  return {
-    success: true,
-    data: {
-      match: false,
-      message: "Interest recorded. Waiting for candidate to swipe yes.",
-    },
-  };
-}
-
-// ─── Tool: get_employer_roles ─────────────────────────────────────────────────
-
-export async function getEmployerRoles(userId: string): Promise<ToolResult> {
-  const [employer] = await db
-    .select()
-    .from(employers)
-    .where(eq(employers.userId, userId))
-    .limit(1);
-
-  if (!employer) {
-    return { success: false, error: "Employer not found" };
-  }
-
-  const employerRoles = await db
+  const [role] = await db
     .select()
     .from(roles)
-    .where(and(eq(roles.employerId, employer.id), eq(roles.isActive, true)));
+    .where(and(eq(roles.id, roleId), eq(roles.isActive, true)))
+    .limit(1);
+
+  if (!role) {
+    return { success: false, error: "Role not found" };
+  }
+
+  const profile = JSON.parse(candidate.profile) as CandidateProfile;
+  const req = JSON.parse(role.requirements) as RoleRequirements;
+
+  // Skill analysis
+  const candidateSkills = (profile.skills ?? []).map((s) => s.toLowerCase());
+  const requiredSkills = (req.skills ?? []).map((s) => s.toLowerCase());
+  const mustHave = (req.mustHave ?? []).map((s) => s.toLowerCase());
+
+  const matchingSkills = candidateSkills.filter((s) => requiredSkills.includes(s));
+  const missingSkills = requiredSkills.filter((s) => !candidateSkills.includes(s));
+  const missingMustHave = mustHave.filter((s) => !candidateSkills.includes(s));
+
+  // Score (0-100)
+  let score = 0;
+  const strengths: string[] = [];
+  const gaps: string[] = [];
+  const tailoring: string[] = [];
+
+  if (matchingSkills.length > 0) {
+    score += Math.min(40, matchingSkills.length * 8);
+    strengths.push(`Skills match: ${matchingSkills.join(", ")}`);
+    tailoring.push(`Lead with these skills prominently: ${matchingSkills.slice(0, 3).join(", ")}`);
+  }
+
+  if (missingMustHave.length === 0 && mustHave.length > 0) {
+    score += 20;
+    strengths.push("Has all must-have requirements");
+  } else if (missingMustHave.length > 0) {
+    gaps.push(`Missing must-have skills: ${missingMustHave.join(", ")}`);
+    tailoring.push(`Address the skill gap for ${missingMustHave[0]} — consider a side project or online course to demonstrate it`);
+  }
+
+  if (missingSkills.length > 0 && missingMustHave.length === 0) {
+    gaps.push(`Nice-to-have gaps: ${missingSkills.join(", ")}`);
+  }
+
+  // Experience
+  if (profile.yearsOfExperience !== undefined) {
+    if (req.minYearsExperience !== undefined) {
+      if (profile.yearsOfExperience >= req.minYearsExperience) {
+        score += 15;
+        strengths.push(`${profile.yearsOfExperience} years experience (meets ${req.minYearsExperience}yr minimum)`);
+      } else {
+        gaps.push(`Experience gap: ${profile.yearsOfExperience}yrs vs ${req.minYearsExperience}yr requirement — frame your projects to show impact, not tenure`);
+      }
+    } else {
+      score += 10;
+    }
+  }
+
+  // Salary
+  if (profile.salaryMin !== undefined && req.salaryMax !== undefined) {
+    if (profile.salaryMin <= req.salaryMax) {
+      score += 10;
+      strengths.push("Salary expectations align with role budget");
+    } else {
+      gaps.push(`Salary mismatch: your floor ($${profile.salaryMin.toLocaleString()}) exceeds their ceiling ($${req.salaryMax.toLocaleString()})`);
+    }
+  }
+
+  // Remote
+  if (req.remote === true && profile.remotePreference === "remote") {
+    score += 5;
+    strengths.push("Remote preference aligned");
+  }
+
+  // General tailoring advice
+  tailoring.push(`Mirror the job description language in your resume headline and summary`);
+  tailoring.push(`Quantify impact in each bullet — numbers matter more than responsibilities`);
 
   return {
     success: true,
     data: {
-      roles: employerRoles.map((r) => ({
-        id: r.id,
-        title: r.title,
-        description: r.description,
-        requirements: JSON.parse(r.requirements),
-      })),
+      roleId,
+      roleTitle: role.title,
+      companyName: role.companyName,
+      fitScore: Math.min(100, score),
+      strengths,
+      gaps,
+      tailoring,
+      applyUrl: role.applyUrl,
+      verdict:
+        score >= 60
+          ? "Strong fit — apply with confidence"
+          : score >= 35
+          ? "Partial fit — tailor carefully and address gaps in your cover letter"
+          : "Stretch role — apply if you can demonstrate transferable impact",
     },
   };
 }

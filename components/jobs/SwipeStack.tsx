@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { SwipeCard } from "./SwipeCard";
+import Link from "next/link";
 
 interface Job {
   id: string;
@@ -30,15 +31,13 @@ export function SwipeStack({ jobs: initialJobs, onEmpty }: SwipeStackProps) {
   const [lastSwipe, setLastSwipe] = useState<{
     direction: "yes" | "no";
     title: string;
+    roleId: string;
   } | null>(null);
 
-  const handleSwipe = async (
-    job: Job,
-    direction: "yes" | "no"
-  ) => {
+  const handleSwipe = async (job: Job, direction: "yes" | "no") => {
     // Optimistically remove from stack
     setJobs((prev) => prev.filter((j) => j.id !== job.id));
-    setLastSwipe({ direction, title: job.title });
+    setLastSwipe({ direction, title: job.title, roleId: job.id });
 
     // Record swipe via Raj's API
     try {
@@ -68,7 +67,9 @@ export function SwipeStack({ jobs: initialJobs, onEmpty }: SwipeStackProps) {
         <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center text-2xl">
           ✓
         </div>
-        <h3 className="font-semibold text-gray-900">You've seen everything Raj has for you</h3>
+        <h3 className="font-semibold text-gray-900">
+          You&apos;ve seen everything Raj has for you
+        </h3>
         <p className="text-sm text-gray-500">
           Chat with Raj to update your preferences or explore new types of roles.
         </p>
@@ -84,9 +85,9 @@ export function SwipeStack({ jobs: initialJobs, onEmpty }: SwipeStackProps) {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Last swipe feedback */}
+      {/* Last swipe feedback + Prep with Prachi CTA */}
       {lastSwipe && (
-        <div className="px-4 py-2 text-center">
+        <div className="px-4 py-2 flex items-center justify-between gap-2">
           <span
             className={`text-sm font-medium ${
               lastSwipe.direction === "yes" ? "text-green-600" : "text-gray-400"
@@ -96,6 +97,14 @@ export function SwipeStack({ jobs: initialJobs, onEmpty }: SwipeStackProps) {
               ? `✓ Interested in ${lastSwipe.title}`
               : `Passed on ${lastSwipe.title}`}
           </span>
+          {lastSwipe.direction === "yes" && (
+            <Link
+              href={`/prep/${lastSwipe.roleId}`}
+              className="text-xs font-medium text-[#1E3A5F] bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              Prep with Prachi →
+            </Link>
+          )}
         </div>
       )}
 
@@ -112,7 +121,11 @@ export function SwipeStack({ jobs: initialJobs, onEmpty }: SwipeStackProps) {
       </div>
 
       {/* Always-visible Yes/No buttons (a11y) */}
-      <div className="flex gap-4 px-8 py-4 pb-20" role="group" aria-label="Swipe actions">
+      <div
+        className="flex gap-4 px-8 py-4 pb-20"
+        role="group"
+        aria-label="Swipe actions"
+      >
         <button
           onClick={() => jobs[0] && handleSwipe(jobs[0], "no")}
           disabled={jobs.length === 0}

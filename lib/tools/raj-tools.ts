@@ -98,6 +98,9 @@ export async function searchJobs(
       description: roles.description,
       requirements: roles.requirements,
       employerId: roles.employerId,
+      companyName: roles.companyName,
+      applyUrl: roles.applyUrl,
+      source: roles.source,
     })
     .from(roles)
     .where(
@@ -148,15 +151,23 @@ export async function searchJobs(
     })
     .sort((a, b) => b.score - a.score);
 
-  // Enrich with employer info
+  // Enrich with company name — external jobs store it directly on the role
   const enriched = await Promise.all(
     scored.map(async (role) => {
-      const [employer] = await db
-        .select({ companyName: employers.companyName })
-        .from(employers)
-        .where(eq(employers.id, role.employerId))
-        .limit(1);
-      return { ...role, companyName: employer?.companyName ?? "Unknown Company" };
+      // External jobs already have companyName on the role row
+      if (role.companyName) {
+        return { ...role };
+      }
+      // Internal roles: look up employer
+      if (role.employerId) {
+        const [employer] = await db
+          .select({ companyName: employers.companyName })
+          .from(employers)
+          .where(eq(employers.id, role.employerId))
+          .limit(1);
+        return { ...role, companyName: employer?.companyName ?? "Unknown Company" };
+      }
+      return { ...role, companyName: "Unknown Company" };
     })
   );
 

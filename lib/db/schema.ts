@@ -114,9 +114,16 @@ export const roles = pgTable(
   "roles",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    employerId: uuid("employer_id")
-      .notNull()
-      .references(() => employers.id, { onDelete: "cascade" }),
+    // Nullable: internal roles reference an employer, external jobs do not
+    employerId: uuid("employer_id").references(() => employers.id, {
+      onDelete: "cascade",
+    }),
+    // For external jobs: company name, source API, and deduplication key
+    companyName: text("company_name"),
+    source: text("source"), // e.g. "remotive", "arbeitnow", "wwr", "hn"
+    externalId: text("external_id"), // original ID from source API
+    applyUrl: text("apply_url"), // direct link to real company apply page
+    logoUrl: text("logo_url"),
     title: text("title").notNull(),
     description: text("description").default("").notNull(),
     // Typed via RoleRequirements Zod schema in lib/types.ts
@@ -124,7 +131,11 @@ export const roles = pgTable(
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
   },
-  (t) => [index("roles_employer_id_idx").on(t.employerId)]
+  (t) => [
+    index("roles_employer_id_idx").on(t.employerId),
+    // Deduplication index — one row per (source, external_id) pair
+    index("roles_source_external_id_idx").on(t.source, t.externalId),
+  ]
 );
 
 export const jobSwipes = pgTable(

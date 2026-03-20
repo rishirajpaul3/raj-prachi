@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getSessionUserId, ensureUserExists } from "@/lib/session";
 import { db } from "@/lib/db";
 import { conversations, messages, candidates } from "@/lib/db/schema";
 import { eq, and, asc } from "drizzle-orm";
@@ -27,20 +27,11 @@ type FunctionToolCall = {
 
 export async function POST(req: NextRequest) {
   try {
-    const session = await auth();
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const userId = await getSessionUserId();
+    if (!userId) {
+      return NextResponse.json({ error: "No session" }, { status: 401 });
     }
-
-    const userId = session.user.id;
-    const userType = (session.user as { type?: string }).type;
-
-    if (userType !== "seeker") {
-      return NextResponse.json(
-        { error: "Only job seekers can talk to Raj" },
-        { status: 403 }
-      );
-    }
+    await ensureUserExists(userId);
 
     const { message, conversationId } = (await req.json()) as {
       message: string;

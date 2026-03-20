@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getSessionUserId, ensureUserExists } from "@/lib/session";
 import { db } from "@/lib/db";
-import { conversations, messages, employers, roles } from "@/lib/db/schema";
+import { conversations, messages, roles, employers } from "@/lib/db/schema";
 import { eq, and, asc } from "drizzle-orm";
 import {
   PRACHI_SYSTEM_PROMPT,
@@ -9,11 +9,9 @@ import {
   createPrachiClient,
 } from "@/lib/agents/prachi";
 import {
-  createRole,
-  updateRole,
-  findCandidates,
-  recordEmployerInterest,
-  getEmployerRoles,
+  getJobDetails,
+  getCandidateProfile,
+  analyzeFit,
 } from "@/lib/tools/prachi-tools";
 import type OpenAI from "openai";
 
@@ -29,31 +27,23 @@ type FunctionToolCall = {
 
 export async function POST(req: NextRequest) {
   try {
-    const session = await auth();
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const userId = await getSessionUserId();
+    if (!userId) {
+      return NextResponse.json({ error: "No session" }, { status: 401 });
     }
+    await ensureUserExists(userId);
 
-    const userId = session.user.id;
-    const userType = (session.user as { type?: string }).type;
-
-    if (userType !== "employer") {
-      return NextResponse.json(
-        { error: "Only employers can talk to Prachi" },
-        { status: 403 }
-      );
-    }
-
-    const { message, conversationId } = (await req.json()) as {
+    const { message, conversationId, roleId } = (await req.json()) as {
       message: string;
       conversationId?: string;
+      roleId?: string;
     };
 
     if (!message?.trim()) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 });
     }
 
-    // Get or create the main Prachi conversation for this user
+    // Get or create Prachi conversation — scoped to roleId if provided
     let conversation;
     if (conversationId) {
       const [found] = await db
@@ -72,7 +62,11 @@ export async function POST(req: NextRequest) {
     if (!conversation) {
       const [created] = await db
         .insert(conversations)
-        .values({ userId, agent: "prachi" })
+        .values({
+          userId,
+          agent: "prachi",
+          roleId: roleId ?? null,
+        })
         .returning();
       conversation = created;
     }
@@ -101,27 +95,29 @@ export async function POST(req: NextRequest) {
     });
     groqMessages.push({ role: "user", content: message });
 
-    // Inject employer context into system prompt
-    const [employer] = await db
-      .select()
-      .from(employers)
-      .where(eq(employers.userId, userId))
-      .limit(1);
+    // Build job context for system prompt if roleId is set
+    let jobContext = "";
+    const contextRoleId = roleId ?? conversation.roleId;
+    if (contextRoleId) {
+      const [role] = await db
+        .select()
+        .from(roles)
+        .where(eq(roles.id, contextRoleId))
+        .limit(1);
 
-    const employerRoles = employer
-      ? await db
-          .select({ id: roles.id, title: roles.title })
-          .from(roles)
-          .where(and(eq(roles.employerId, employer.id), eq(roles.isActive, true)))
-      : [];
-
-    const employerContext = employer
-      ? `\n\nEmployer: ${employer.companyName}. Active roles: ${
-          employerRoles.length > 0
-            ? employerRoles.map((r) => `${r.title} (id: ${r.id})`).join(", ")
-            : "none yet"
-        }.`
-      : "\n\nNew employer — no company profile or roles yet.";
+      if (role) {
+        let companyName = role.companyName;
+        if (!companyName && role.employerId) {
+          const [employer] = await db
+            .select({ companyName: employers.companyName })
+            .from(employers)
+            .where(eq(employers.id, role.employerId))
+            .limit(1);
+          companyName = employer?.companyName ?? null;
+        }
+        jobContext = `\n\nContext: This conversation is about the "${role.title}" role at ${companyName ?? "Unknown Company"} (role_id: ${role.id}). The seeker is preparing to apply for or analyze this specific job. Use get_job_details and get_candidate_profile to give tailored advice.`;
+      }
+    }
 
     // ─── Server-side agentic loop ─────────────────────────────────────────────
     const client = createPrachiClient();
@@ -133,7 +129,7 @@ export async function POST(req: NextRequest) {
         model: "llama-3.3-70b-versatile",
         max_tokens: 1024,
         messages: [
-          { role: "system", content: PRACHI_SYSTEM_PROMPT + employerContext },
+          { role: "system", content: PRACHI_SYSTEM_PROMPT + jobContext },
           ...groqMessages,
         ],
         tools: PRACHI_TOOLS,
@@ -171,7 +167,12 @@ export async function POST(req: NextRequest) {
         for (const toolCall of toolCalls) {
           toolCallCount++;
           const args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
-          const result = await executePrachiTool(toolCall.function.name, args, userId);
+          const result = await executePrachiTool(
+            toolCall.function.name,
+            args,
+            userId,
+            contextRoleId
+          );
 
           await db.insert(messages).values({
             conversationId: conversation.id,
@@ -196,11 +197,11 @@ export async function POST(req: NextRequest) {
 
     if (toolCallCount >= MAX_TOOL_CALLS) {
       finalResponse =
-        "I'm running into some complexity here. Could you clarify what you'd like me to do?";
+        "I'm gathering a lot of information here. Could you focus your question so I can give you sharper advice?";
     }
 
     if (!finalResponse) {
-      finalResponse = "I'm here — how can I help with your hiring?";
+      finalResponse = "I'm here to help you land this role — what would you like to dig into?";
     }
 
     await db.insert(messages).values({
@@ -228,38 +229,20 @@ export async function POST(req: NextRequest) {
 async function executePrachiTool(
   name: string,
   args: Record<string, unknown>,
-  userId: string
+  userId: string,
+  contextRoleId?: string | null
 ): Promise<unknown> {
   switch (name) {
-    case "create_role":
-      return createRole(userId, {
-        title: args.title as string,
-        description: args.description as string | undefined,
-        requirements: args.requirements,
-      });
+    case "get_job_details":
+      return getJobDetails((args.role_id as string) ?? contextRoleId ?? "");
 
-    case "update_role":
-      return updateRole(userId, args.role_id as string, {
-        title: args.title as string | undefined,
-        description: args.description as string | undefined,
-        requirements: args.requirements,
-      });
+    case "get_candidate_profile":
+      return getCandidateProfile(userId);
 
-    case "get_employer_roles":
-      return getEmployerRoles(userId);
-
-    case "find_candidates":
-      return findCandidates(
+    case "analyze_fit":
+      return analyzeFit(
         userId,
-        args.role_id as string,
-        (args.limit as number) ?? 10
-      );
-
-    case "record_employer_interest":
-      return recordEmployerInterest(
-        userId,
-        args.role_id as string,
-        args.candidate_id as string
+        (args.role_id as string) ?? contextRoleId ?? ""
       );
 
     default:
@@ -295,7 +278,7 @@ function buildGroqMessages(
           continue;
         }
       } catch {
-        // Plain text assistant message
+        // Plain text
       }
       result.push({ role: "assistant", content: msg.content });
     } else if (msg.role === "tool" && msg.toolUseId) {

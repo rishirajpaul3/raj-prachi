@@ -1,8 +1,7 @@
-import { auth } from "@/lib/auth";
-import { redirect } from "next/navigation";
+import { requireSession } from "@/lib/session";
 import { TabBar } from "@/components/layout/TabBar";
 import { db } from "@/lib/db";
-import { notifications, users } from "@/lib/db/schema";
+import { notifications } from "@/lib/db/schema";
 import { eq, isNull, and } from "drizzle-orm";
 import { SeekerIcons } from "@/components/layout/SeekerIcons";
 
@@ -11,11 +10,7 @@ export default async function SeekerLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const session = await auth();
-  if (!session?.user?.id) redirect("/login");
-
-  const userType = (session.user as { type?: string }).type;
-  if (userType !== "seeker") redirect("/employer/chat");
+  const userId = await requireSession();
 
   // Unread notification count for badge
   const unread = await db
@@ -23,7 +18,7 @@ export default async function SeekerLayout({
     .from(notifications)
     .where(
       and(
-        eq(notifications.userId, session.user.id),
+        eq(notifications.userId, userId),
         isNull(notifications.readAt)
       )
     );
