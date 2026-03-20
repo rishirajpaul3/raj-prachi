@@ -3,6 +3,24 @@ import { db } from "@/lib/db";
 import { candidates, jobSwipes, roles, employers } from "@/lib/db/schema";
 import { eq, and, desc, inArray } from "drizzle-orm";
 import Link from "next/link";
+import { revalidatePath } from "next/cache";
+
+async function removeSwipe(formData: FormData) {
+  "use server";
+  const swipeId = formData.get("swipeId") as string;
+  if (!swipeId) return;
+  const userId = await requireSession();
+  const [candidate] = await db
+    .select({ id: candidates.id })
+    .from(candidates)
+    .where(eq(candidates.userId, userId))
+    .limit(1);
+  if (!candidate) return;
+  await db
+    .delete(jobSwipes)
+    .where(and(eq(jobSwipes.id, swipeId), eq(jobSwipes.candidateId, candidate.id)));
+  revalidatePath("/applications");
+}
 
 export const dynamic = "force-dynamic";
 
@@ -104,9 +122,21 @@ export default async function ApplicationsPage() {
           {jobs.map((job) => (
             <div
               key={job.swipeId}
-              className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4"
+              className="relative bg-white rounded-2xl border border-gray-100 shadow-sm p-4"
             >
-              <div className="flex items-start gap-3">
+              {/* Remove button */}
+              <form action={removeSwipe} className="absolute top-3 right-3">
+                <input type="hidden" name="swipeId" value={job.swipeId} />
+                <button
+                  type="submit"
+                  aria-label="Remove"
+                  className="w-6 h-6 flex items-center justify-center rounded-full text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors text-sm leading-none"
+                >
+                  ✕
+                </button>
+              </form>
+
+              <div className="flex items-start gap-3 pr-7">
                 <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center text-amber-700 font-bold text-sm flex-shrink-0">
                   {job.companyName[0]}
                 </div>

@@ -247,13 +247,22 @@ function scoreJobForCandidate(
     }
   }
 
+  // Substring matching for longer words handles stems:
+  // "market" (from Go-To-Market) matches "marketing", "marketplace", etc.
+  const titleLower = jobTitle.toLowerCase();
   for (const word of singleWord) {
-    if (titleTokens.has(word)) {
+    const inTitleExact = titleTokens.has(word);
+    const inTitleSub = !inTitleExact && word.length >= 4 && titleLower.includes(word);
+    if (inTitleExact || inTitleSub) {
       textPts += 5;
       matched.add(word);
-    } else if (fullTokens.has(word)) {
-      textPts += 2;
-      matched.add(word);
+    } else {
+      const inBodyExact = fullTokens.has(word);
+      const inBodySub = !inBodyExact && word.length >= 4 && fullText.includes(word);
+      if (inBodyExact || inBodySub) {
+        textPts += 2;
+        matched.add(word);
+      }
     }
   }
 
@@ -266,18 +275,22 @@ function scoreJobForCandidate(
   const tagScore = Math.min(tagMatches.length * 5, 20);
   for (const t of tagMatches) matched.add(t);
 
-  // Preferences (max 20)
+  // Preferences (max 20) — only applied when there is meaningful keyword relevance.
+  // Without this gate, remote/salary/exp bonuses promote completely irrelevant roles
+  // (e.g. a remote SWE job for a GTM candidate scores 0 text + 20 prefs = 20 pts).
   let prefScore = 0;
-  if (profile.remotePreference === "remote" && req.remote) prefScore += 8;
-  else if (profile.remotePreference === "onsite" && !req.remote) prefScore += 5;
-  else if (profile.remotePreference === "hybrid") prefScore += 4;
+  if (textScore + tagScore >= 5) {
+    if (profile.remotePreference === "remote" && req.remote) prefScore += 8;
+    else if (profile.remotePreference === "onsite" && !req.remote) prefScore += 5;
+    else if (profile.remotePreference === "hybrid") prefScore += 4;
 
-  if (profile.salaryMin && req.salaryMax && profile.salaryMin <= req.salaryMax) prefScore += 6;
+    if (profile.salaryMin && req.salaryMax && profile.salaryMin <= req.salaryMax) prefScore += 6;
 
-  if (profile.yearsOfExperience !== undefined) {
-    const min = req.minYearsExperience ?? 0;
-    const max = req.maxYearsExperience ?? 99;
-    if (profile.yearsOfExperience >= min && profile.yearsOfExperience <= max) prefScore += 6;
+    if (profile.yearsOfExperience !== undefined) {
+      const min = req.minYearsExperience ?? 0;
+      const max = req.maxYearsExperience ?? 99;
+      if (profile.yearsOfExperience >= min && profile.yearsOfExperience <= max) prefScore += 6;
+    }
   }
 
   const score = textScore + tagScore + prefScore;
