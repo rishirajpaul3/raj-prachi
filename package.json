@@ -10,7 +10,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run lib/db/migrate.ts",
     "db:studio": "drizzle-kit studio",
-    "db:seed": "bun run lib/db/seed.ts"
+    "db:seed": "bun run lib/db/seed.ts",
+    "db:migrate-vectors": "bun run scripts/migrate-vectors.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",

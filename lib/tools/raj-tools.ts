@@ -17,6 +17,7 @@ import {
 import { CandidateProfileSchema, type ToolResult } from "@/lib/types";
 import { eq, and, ne, notInArray, sql } from "drizzle-orm";
 import { checkMutualMatch } from "@/lib/tools/match";
+import { embedText, profileEmbedText } from "@/lib/embeddings/huggingface";
 
 // ─── Tool: update_candidate_profile ──────────────────────────────────────────
 
@@ -51,7 +52,29 @@ export async function updateCandidateProfile(
     .set({ profile: JSON.stringify(merged), updatedAt: new Date() })
     .where(eq(candidates.userId, userId));
 
+  // Fire-and-forget: regenerate the profile embedding so the Jobs tab
+  // immediately reflects updated skills/interests on the next page load.
+  // Failure is non-critical — app falls back to keyword scoring.
+  void generateProfileEmbedding(
+    candidate.id,
+    merged as Parameters<typeof profileEmbedText>[0]
+  ).catch(() => {/* silently ignore embedding errors */});
+
   return { success: true, data: { profile: merged } };
+}
+
+async function generateProfileEmbedding(
+  candidateId: string,
+  profile: Parameters<typeof profileEmbedText>[0]
+): Promise<void> {
+  if (!process.env.HUGGINGFACE_API_TOKEN) return;
+  const text = profileEmbedText(profile);
+  if (!text.trim()) return;
+  const embedding = await embedText(text);
+  await db
+    .update(candidates)
+    .set({ profileEmbedding: embedding, embeddingUpdatedAt: new Date() })
+    .where(eq(candidates.id, candidateId));
 }
 
 // ─── Tool: search_jobs ────────────────────────────────────────────────────────

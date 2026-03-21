@@ -8,7 +8,26 @@ import {
   boolean,
   primaryKey,
   index,
+  customType,
 } from "drizzle-orm/pg-core";
+
+/**
+ * pgvector column — stores a 384-dim float32 vector.
+ * Neon HTTP driver returns vector data as the string "[0.1,0.2,...]",
+ * so we parse/serialize manually. Nullable: jobs without embeddings
+ * fall back to keyword scoring.
+ */
+const vector384 = customType<{ data: number[]; driverData: string }>({
+  dataType() {
+    return "vector(384)";
+  },
+  fromDriver(value: string) {
+    return JSON.parse(value) as number[];
+  },
+  toDriver(value: number[]) {
+    return `[${value.join(",")}]`;
+  },
+});
 import type { AdapterAccountType } from "next-auth/adapters";
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
@@ -92,6 +111,9 @@ export const candidates = pgTable(
     // Typed via CandidateProfile Zod schema in lib/types.ts
     profile: text("profile").default("{}").notNull(),
     updatedAt: timestamp("updated_at", { mode: "date" }).defaultNow().notNull(),
+    // Vector embedding of skills+interests+goals for semantic job matching
+    profileEmbedding: vector384("profile_embedding"),
+    embeddingUpdatedAt: timestamp("embedding_updated_at", { mode: "date" }),
   },
   (t) => [index("candidates_user_id_idx").on(t.userId)]
 );
@@ -130,6 +152,9 @@ export const roles = pgTable(
     requirements: text("requirements").default("{}").notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow().notNull(),
+    // Vector embedding of title+description for semantic candidate matching
+    jobEmbedding: vector384("job_embedding"),
+    embeddingUpdatedAt: timestamp("embedding_updated_at", { mode: "date" }),
   },
   (t) => [
     index("roles_employer_id_idx").on(t.employerId),

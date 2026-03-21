@@ -5,6 +5,11 @@ import { eq, and, notInArray, desc, inArray, gte } from "drizzle-orm";
 import { JobList } from "@/components/jobs/JobList";
 import Link from "next/link";
 import type { CandidateProfile } from "@/lib/types";
+import {
+  cosineSimilarity,
+  similarityToScore,
+  parseVector,
+} from "@/lib/embeddings/huggingface";
 
 // Always re-render so the latest profile/swipes are used for scoring
 export const dynamic = "force-dynamic";
@@ -68,6 +73,9 @@ export default async function JobsPage() {
   const candidateTerms = buildCandidateTerms(profile);
   const hasProfile = candidateTerms.length > 0;
 
+  // Parse the stored profile embedding once (Neon returns it as a string)
+  const profileVec = parseVector(candidate?.profileEmbedding ?? null);
+
   const scored = allRoles.map((role) => {
     const req = JSON.parse(role.requirements) as {
       skills?: string[];
@@ -86,9 +94,17 @@ export default async function JobsPage() {
       (role.employerId ? employerMap.get(role.employerId) : undefined) ??
       "Unknown Company";
 
-    const { score, matchedKeywords } = hasProfile
+    // Always run keyword matching for matchedSkills + rajReason text
+    const { score: kwScore, matchedKeywords } = hasProfile
       ? scoreJobForCandidate(profile, candidateTerms, role.title, role.description, req)
       : { score: 0, matchedKeywords: [] as string[] };
+
+    // Use vector similarity when both embeddings exist; keyword score as fallback
+    const jobVec = parseVector(role.jobEmbedding ?? null);
+    const score =
+      profileVec && jobVec
+        ? similarityToScore(cosineSimilarity(profileVec, jobVec))
+        : kwScore;
 
     return {
       id: role.id,

@@ -7,7 +7,8 @@
 import { XMLParser } from "fast-xml-parser";
 import { db } from "@/lib/db";
 import { roles } from "@/lib/db/schema";
-import { and, eq, sql, lt, isNotNull, inArray } from "drizzle-orm";
+import { and, eq, sql, lt, isNotNull, isNull } from "drizzle-orm";
+import { embedBatch, jobEmbedText } from "@/lib/embeddings/huggingface";
 
 interface NormalizedJob {
   externalId: string;
@@ -419,7 +420,63 @@ export async function refreshJobs(): Promise<{
   const urlCheckErrors = await spotCheckUrls();
   errors.push(...urlCheckErrors);
 
+  // Generate embeddings for active jobs that don't have one yet.
+  // Capped at 200 per run to stay well within HuggingFace free-tier rate limits
+  // (~1000 req/hour; 200 jobs in 4 batches of 50 ≈ 4 API calls).
+  const embeddingErrors = await generateMissingJobEmbeddings(200);
+  errors.push(...embeddingErrors);
+
   return { fetched: allJobs.length, upserted, errors };
+}
+
+// ─── Embedding generator ──────────────────────────────────────────────────────
+// Generates sentence embeddings for active jobs that don't have one yet.
+// Batches 50 texts per API call to minimise HuggingFace request count.
+
+async function generateMissingJobEmbeddings(limit: number): Promise<string[]> {
+  if (!process.env.HUGGINGFACE_API_TOKEN) {
+    return []; // Silently skip if token not configured — app falls back to keyword matching
+  }
+
+  const unembedded = await db
+    .select({ id: roles.id, title: roles.title, description: roles.description })
+    .from(roles)
+    .where(and(eq(roles.isActive, true), isNull(roles.jobEmbedding)))
+    .limit(limit);
+
+  if (unembedded.length === 0) return [];
+
+  const errors: string[] = [];
+  const BATCH = 50;
+
+  for (let i = 0; i < unembedded.length; i += BATCH) {
+    const batch = unembedded.slice(i, i + BATCH);
+    try {
+      const texts = batch.map((j) => jobEmbedText(j.title, j.description));
+      const embeddings = await embedBatch(texts);
+
+      // Persist each embedding; individual failures don't abort the loop
+      for (let k = 0; k < batch.length; k++) {
+        try {
+          await db
+            .update(roles)
+            .set({ jobEmbedding: embeddings[k], embeddingUpdatedAt: new Date() })
+            .where(eq(roles.id, batch[k].id));
+        } catch (e) {
+          errors.push(`embed-write ${batch[k].id}: ${String(e)}`);
+        }
+      }
+    } catch (e) {
+      errors.push(`embed-batch ${i}: ${String(e)}`);
+    }
+
+    // Brief pause between batches — keeps well within free-tier rate limits
+    if (i + BATCH < unembedded.length) {
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+
+  return errors;
 }
 
 // ─── URL spot-checker ─────────────────────────────────────────────────────────
