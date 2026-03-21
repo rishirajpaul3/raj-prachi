@@ -22,7 +22,12 @@ const vector384 = customType<{ data: number[]; driverData: string }>({
     return "vector(384)";
   },
   fromDriver(value: string) {
-    return JSON.parse(value) as number[];
+    // Neon HTTP driver returns "[0.1,0.2,...]" as a plain string
+    try {
+      return JSON.parse(value) as number[];
+    } catch {
+      return [];
+    }
   },
   toDriver(value: number[]) {
     return `[${value.join(",")}]`;
