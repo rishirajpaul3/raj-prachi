@@ -1,4 +1,4 @@
-# Raj & Prachi — AI Hiring Platform
+AI Hiring Platform
 
 Two AI agents. One for job seekers (Raj), one for employers (Prachi).
 When both sides say yes, Prachi makes the introduction.
